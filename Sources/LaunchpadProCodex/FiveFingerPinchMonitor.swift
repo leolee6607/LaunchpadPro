@@ -1,6 +1,7 @@
 import AppKit
 import CoreFoundation
 import Foundation
+import IOKit
 
 // MultitouchSupport is a private macOS framework. Keeping its declarations and
 // unsafe memory access in this file makes the compatibility boundary explicit.
@@ -22,8 +23,17 @@ private func MTDeviceCreateList() -> CFArray?
 @_silgen_name("MTDeviceStart")
 private func MTDeviceStart(_ device: MTDeviceRef, _ mode: Int32)
 
+@_silgen_name("MTDeviceStop")
+private func MTDeviceStop(_ device: MTDeviceRef)
+
+@_silgen_name("MTDeviceIsRunning")
+private func MTDeviceIsRunning(_ device: MTDeviceRef) -> Bool
+
 @_silgen_name("MTRegisterContactFrameCallback")
 private func MTRegisterContactFrameCallback(_ device: MTDeviceRef, _ callback: MTContactCallback)
+
+@_silgen_name("MTUnregisterContactFrameCallback")
+private func MTUnregisterContactFrameCallback(_ device: MTDeviceRef, _ callback: MTContactCallback)
 
 struct MTPoint {
     var x: Float
@@ -83,11 +93,23 @@ final class FiveFingerPinchMonitor: @unchecked Sendable {
 
     private let lock = NSLock()
     private var devices: [MTDeviceRef] = []
+    /// Retains the CFArray returned by MTDeviceCreateList so the device refs in
+    /// `devices` stay valid between rescans.
+    private var deviceList: CFArray?
     private var hasStarted = false
     private var isEnabled = false
+    private var rescanPending = false
     private var recognizer = FiveFingerPinchRecognizer()
     private var action: (() -> Void)?
     private let frameworkAvailable: Bool
+
+    /// All device enumeration, registration, and teardown runs on this serial
+    /// queue so hot-plug rescans can never interleave.
+    private let scanQueue = DispatchQueue(label: "codex.fiveFingerPinch.deviceScan")
+    /// Touched only on `scanQueue`.
+    private var hotPlugPort: IONotificationPortRef?
+    private var hotPlugIterator: io_iterator_t = 0
+    private var wakeObserver: NSObjectProtocol?
 
     private init() {
         frameworkAvailable = MTDeviceCreateList().map { CFArrayGetCount($0) > 0 } ?? false
@@ -116,7 +138,20 @@ final class FiveFingerPinchMonitor: @unchecked Sendable {
         lock.unlock()
 
         if shouldStart {
-            startDevices()
+            scanQueue.async {
+                self.rescanDevices()
+                self.startHotPlugMonitoring()
+            }
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: nil
+            ) { _ in
+                // Bluetooth trackpads reconnect a few seconds after wake. The
+                // IOKit attach notification usually covers this; the wake hook
+                // is a fallback for reconnects IOKit reports before we resume.
+                FiveFingerPinchMonitor.shared.scheduleRescan(afterDelay: 3.0)
+            }
         }
     }
 
@@ -128,10 +163,47 @@ final class FiveFingerPinchMonitor: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func startDevices() {
-        var discovered: [MTDeviceRef] = []
+    /// Coalesces rescan requests from hot-plug and wake events. The delay gives
+    /// MultitouchSupport time to publish a freshly attached device before we
+    /// re-enumerate.
+    fileprivate func scheduleRescan(afterDelay delay: TimeInterval) {
+        lock.lock()
+        let shouldSchedule = hasStarted && !rescanPending
+        if shouldSchedule {
+            rescanPending = true
+        }
+        lock.unlock()
+        guard shouldSchedule else { return }
 
-        if let list = MTDeviceCreateList() {
+        scanQueue.asyncAfter(deadline: .now() + delay) {
+            self.lock.lock()
+            self.rescanPending = false
+            self.lock.unlock()
+            self.rescanDevices()
+        }
+    }
+
+    /// Runs on `scanQueue` only. Tears down every previous registration and
+    /// re-enumerates, because a Bluetooth trackpad that reconnects comes back as
+    /// a new device ref — stale refs cannot be revived, only replaced.
+    private func rescanDevices() {
+        lock.lock()
+        let previousDevices = devices
+        let previousList = deviceList
+        devices = []
+        deviceList = nil
+        lock.unlock()
+
+        for device in previousDevices {
+            MTUnregisterContactFrameCallback(device, launchpadProContactCallback)
+            if MTDeviceIsRunning(device) {
+                MTDeviceStop(device)
+            }
+        }
+
+        var discovered: [MTDeviceRef] = []
+        let list = MTDeviceCreateList()
+        if let list {
             for index in 0..<CFArrayGetCount(list) {
                 guard let value = CFArrayGetValueAtIndex(list, index) else { continue }
                 let device = UnsafeMutableRawPointer(mutating: value)
@@ -141,16 +213,11 @@ final class FiveFingerPinchMonitor: @unchecked Sendable {
             }
         }
 
-        if let fallback = MTDeviceCreateDefault(),
-           !discovered.contains(where: { $0 == fallback }) {
+        // CreateDefault may hand back a second wrapper for a device already in
+        // the list, which would double-register its callback — only fall back
+        // to it when enumeration found nothing at all.
+        if discovered.isEmpty, let fallback = MTDeviceCreateDefault() {
             discovered.append(fallback)
-        }
-
-        guard !discovered.isEmpty else {
-            lock.lock()
-            hasStarted = false
-            lock.unlock()
-            return
         }
 
         for device in discovered {
@@ -160,7 +227,53 @@ final class FiveFingerPinchMonitor: @unchecked Sendable {
 
         lock.lock()
         devices = discovered
+        deviceList = list
+        recognizer.reset()
         lock.unlock()
+
+        withExtendedLifetime(previousList) {}
+    }
+
+    /// Runs on `scanQueue` only. An empty enumeration is no longer fatal: once
+    /// armed, the matched notification triggers a rescan whenever a multitouch
+    /// device attaches (including Bluetooth trackpads reconnecting after sleep).
+    private func startHotPlugMonitoring() {
+        guard hotPlugPort == nil,
+              let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        IONotificationPortSetDispatchQueue(port, scanQueue)
+
+        let callback: IOServiceMatchingCallback = { _, iterator in
+            var entry = IOIteratorNext(iterator)
+            while entry != 0 {
+                IOObjectRelease(entry)
+                entry = IOIteratorNext(iterator)
+            }
+            FiveFingerPinchMonitor.shared.scheduleRescan(afterDelay: 1.0)
+        }
+
+        var iterator: io_iterator_t = 0
+        let result = IOServiceAddMatchingNotification(
+            port,
+            kIOMatchedNotification,
+            IOServiceMatching("AppleMultitouchDevice"),
+            callback,
+            nil,
+            &iterator
+        )
+        guard result == KERN_SUCCESS else {
+            IONotificationPortDestroy(port)
+            return
+        }
+
+        // Drain the devices already present to arm the notification.
+        var entry = IOIteratorNext(iterator)
+        while entry != 0 {
+            IOObjectRelease(entry)
+            entry = IOIteratorNext(iterator)
+        }
+
+        hotPlugPort = port
+        hotPlugIterator = iterator
     }
 
     fileprivate func process(
