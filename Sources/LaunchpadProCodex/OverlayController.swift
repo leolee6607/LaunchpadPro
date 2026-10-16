@@ -31,9 +31,15 @@ final class OverlayController {
     }
 
     func show() {
+        let started = FrameMeter.enabled ? CACurrentMediaTime() : 0
+        defer {
+            if FrameMeter.enabled {
+                FrameMeter.noteShow(duration: CACurrentMediaTime() - started)
+            }
+        }
         guard let screen = screenUnderMouse() else { return }
 
-        model.reload()
+        model.reloadAsync()
         model.searchText = ""
         model.openFolderID = nil
         LauncherBus.shared.targetScreenTopSafeArea = screen.safeAreaInsets.top
