@@ -12,6 +12,10 @@
 		2D1D6C7A47040E1EA3B22078 /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 476A614A0CF0A6E63A7C0B90 /* ServiceManagement.framework */; };
 		3782F6E6C471ED53A31AF566 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55B6E44CC5CFAC76ED4DEE6D /* SettingsView.swift */; };
 		3F0BAA01912CC10D765BA020 /* LauncherBus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 713A2267E6BB02AB5EF07883 /* LauncherBus.swift */; };
+		06E6ADF2E335F0285A46BC7D /* PagerPhysics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BB4D5CBD7FFC847682D28D0 /* PagerPhysics.swift */; };
+		6C84397241429D94C2333E5D /* PageStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3280EAE96CF48A6AC790867 /* PageStripView.swift */; };
+		7E2DCEE5DEC7F871155D3DE4 /* PagerController.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF66EF1E5ACC7F33CE96C06 /* PagerController.swift */; };
+		241F180713ECB9B2A9D260FF /* FrameMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDAEA5A0CA4945036F9E47D1 /* FrameMeter.swift */; };
 		40C664D4155659B7DD2D50DD /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0C449F677C9BA4B69C2AC9BF /* QuartzCore.framework */; };
 		494054353DFC06B590736DB9 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C080477119038C1CC5C8619 /* AppSettings.swift */; };
 		5F1A0B8C2D3E4F5061728394 /* FiveFingerPinchMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A2B1C9D3E4F506172839405 /* FiveFingerPinchMonitor.swift */; };
@@ -47,6 +51,10 @@
 		59A93C7ADEB07D84A7899B9D /* AppIcon.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = AppIcon.png; sourceTree = "<group>"; };
 		6A2B1C9D3E4F506172839405 /* FiveFingerPinchMonitor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FiveFingerPinchMonitor.swift; sourceTree = "<group>"; };
 		713A2267E6BB02AB5EF07883 /* LauncherBus.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherBus.swift; sourceTree = "<group>"; };
+		7BB4D5CBD7FFC847682D28D0 /* PagerPhysics.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PagerPhysics.swift; sourceTree = "<group>"; };
+		A3280EAE96CF48A6AC790867 /* PageStripView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PageStripView.swift; sourceTree = "<group>"; };
+		EDF66EF1E5ACC7F33CE96C06 /* PagerController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PagerController.swift; sourceTree = "<group>"; };
+		FDAEA5A0CA4945036F9E47D1 /* FrameMeter.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FrameMeter.swift; sourceTree = "<group>"; };
 		8ABAB70D81623B7988885E47 /* HotKey.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HotKey.swift; sourceTree = "<group>"; };
 		941E3966E9264BF9862952B9 /* AppDirectoryWatcher.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppDirectoryWatcher.swift; sourceTree = "<group>"; };
 		A01D35F11C60050986DCF04E /* LaunchpadPro.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LaunchpadPro.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -111,6 +119,10 @@
 				8ABAB70D81623B7988885E47 /* HotKey.swift */,
 				FAA99F7691DD550637EE9871 /* LaunchModel.swift */,
 				713A2267E6BB02AB5EF07883 /* LauncherBus.swift */,
+				7BB4D5CBD7FFC847682D28D0 /* PagerPhysics.swift */,
+				A3280EAE96CF48A6AC790867 /* PageStripView.swift */,
+				EDF66EF1E5ACC7F33CE96C06 /* PagerController.swift */,
+				FDAEA5A0CA4945036F9E47D1 /* FrameMeter.swift */,
 				D28E7B978A8EE04604B861F4 /* LauncherViews.swift */,
 				4A4DF5F541F64983B1ECE8D0 /* OverlayController.swift */,
 				3C0EFE79A36D1D8E3564218D /* PagedLauncherView.swift */,
@@ -244,6 +256,10 @@
 				7B71944A498188FB3D0FED1E /* HotKey.swift in Sources */,
 				EFEA68A69832AF04A063C9F5 /* LaunchModel.swift in Sources */,
 				3F0BAA01912CC10D765BA020 /* LauncherBus.swift in Sources */,
+				06E6ADF2E335F0285A46BC7D /* PagerPhysics.swift in Sources */,
+				6C84397241429D94C2333E5D /* PageStripView.swift in Sources */,
+				7E2DCEE5DEC7F871155D3DE4 /* PagerController.swift in Sources */,
+				241F180713ECB9B2A9D260FF /* FrameMeter.swift in Sources */,
 				CB2AA3E9F296F93A467D6F93 /* LauncherViews.swift in Sources */,
 				BBE64A4D77D760001B65CABD /* OverlayController.swift in Sources */,
 				C6819B6F02EEB6BCA441B84A /* PagedLauncherView.swift in Sources */,
@@ -335,7 +351,7 @@
 				INFOPLIST_FILE = "Support/LaunchpadPro-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.2.3;
+				MARKETING_VERSION = 1.2.4;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -437,7 +453,7 @@
 				INFOPLIST_FILE = "Support/LaunchpadPro-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.2.3;
+				MARKETING_VERSION = 1.2.4;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",

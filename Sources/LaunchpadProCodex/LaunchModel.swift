@@ -16,6 +16,7 @@ final class LaunchModel: ObservableObject {
     private(set) var pageArrangement: [[String]] = []
     private var appIndex: [String: AppRecord] = [:]
     private var loadedLayout: SavedLayout?
+    private var reloadGeneration = 0
 
     let settings = AppSettings.shared
 
@@ -24,7 +25,39 @@ final class LaunchModel: ObservableObject {
     }
 
     func reload() {
-        let scanned = AppScanner.scan()
+        reloadGeneration += 1
+        applyScan(AppScanner.scan())
+    }
+
+    func reloadAsync(force: Bool = false) {
+        reloadGeneration += 1
+        let generation = reloadGeneration
+        Task { [weak self] in
+            let scanned = await Task.detached(priority: .userInitiated) {
+                AppScanner.scan()
+            }.value
+            guard let self, Self.shouldApplyReload(
+                scanned,
+                currentApps: self.apps,
+                generation: generation,
+                currentGeneration: self.reloadGeneration,
+                force: force
+            ) else { return }
+            self.applyScan(scanned)
+        }
+    }
+
+    nonisolated static func shouldApplyReload(
+        _ scanned: [AppRecord],
+        currentApps: [AppRecord],
+        generation: Int,
+        currentGeneration: Int,
+        force: Bool
+    ) -> Bool {
+        generation == currentGeneration && (force || scanned != currentApps)
+    }
+
+    private func applyScan(_ scanned: [AppRecord]) {
         apps = scanned
         appIndex = Dictionary(uniqueKeysWithValues: scanned.map { ($0.id, $0) })
         load()

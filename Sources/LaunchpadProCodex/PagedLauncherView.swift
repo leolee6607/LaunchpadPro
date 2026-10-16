@@ -1,6 +1,6 @@
 import SwiftUI
 
-private struct PlacedEntry: Identifiable {
+struct PlacedEntry: Identifiable {
     let page: Int
     let index: Int
     let entry: LaunchEntry
@@ -8,18 +8,98 @@ private struct PlacedEntry: Identifiable {
     var id: String { entry.id }
 }
 
-private struct EntryFramePreference: PreferenceKey {
-    static let defaultValue: [String: CGRect] = [:]
+struct PageGridGeometry {
+    let size: CGSize
+    let cell: CGSize
+    let columns: Int
+    let topInset: CGFloat
+    let sidePadding: CGFloat
+    let columnGap: CGFloat
+    let rowGap: CGFloat
 
-    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
-        value.merge(nextValue()) { _, new in new }
+    func center(page: Int, index: Int, selectedPage: Int = 0) -> CGPoint {
+        let row = index / columns
+        let column = index % columns
+        let pageOffset = CGFloat(page - selectedPage) * size.width
+        return CGPoint(
+            x: pageOffset + sidePadding + CGFloat(column) * (cell.width + columnGap) + cell.width / 2,
+            y: topInset + CGFloat(row) * (cell.height + rowGap) + cell.height / 2
+        )
+    }
+
+    func position(for placed: PlacedEntry, indexMap: [String: (page: Int, index: Int)],
+                  draggingID: String?) -> CGPoint {
+        if placed.id != draggingID, let location = indexMap[placed.id] {
+            return center(page: location.page, index: location.index)
+        }
+        return center(page: placed.page, index: placed.index)
+    }
+
+    static func viewportPosition(_ position: CGPoint, stripOffset: CGFloat) -> CGPoint {
+        CGPoint(x: position.x - stripOffset, y: position.y)
+    }
+}
+
+struct PageDragPresentation {
+    let id = UUID()
+    var page: Int
+    var stripOffset: CGFloat
+    var landingEntry: LaunchEntry?
+    var landingPoint: CGPoint?
+    var pageAnimationID: UUID?
+    var isSettling = false
+    var dropAnimationFinished = false
+
+    var canReturnToStrip: Bool {
+        isSettling && dropAnimationFinished && pageAnimationID == nil
+    }
+}
+
+enum PageStripReordering {
+    struct Location: Equatable {
+        let page: Int
+        let index: Int
+    }
+
+    static func locations(in pages: [[LaunchEntry]]) -> [String: Location] {
+        var result: [String: Location] = [:]
+        for (page, entries) in pages.enumerated() {
+            for (index, entry) in entries.enumerated() {
+                result[entry.id] = Location(page: page, index: index)
+            }
+        }
+        return result
+    }
+
+    static func preview(
+        pages: [[LaunchEntry]], draggingID: String, target: (page: Int, index: Int), perPage: Int
+    ) -> [[LaunchEntry]] {
+        var result = pages
+        guard let source = locations(in: pages)[draggingID] else { return result }
+        let entry = result[source.page].remove(at: source.index)
+        while target.page >= result.count { result.append([]) }
+        let index = min(max(target.index, 0), result[target.page].count)
+        result[target.page].insert(entry, at: index)
+        cascadeOverflow(&result, perPage: perPage)
+        return result
+    }
+
+    static func cascadeOverflow(_ layout: inout [[LaunchEntry]], perPage: Int) {
+        var page = 0
+        while page < layout.count {
+            while layout[page].count > perPage {
+                let overflow = layout[page].removeLast()
+                if page + 1 >= layout.count { layout.append([]) }
+                layout[page + 1].insert(overflow, at: 0)
+            }
+            page += 1
+        }
     }
 }
 
 private struct FolderPanelMetrics {
     let cell: CGSize
     let columns: Int
-    let rows: Int
     let horizontalSpacing: CGFloat
     let verticalSpacing: CGFloat
     let panelWidth: CGFloat
@@ -36,6 +116,7 @@ struct PagedLauncherView: View {
     @ObservedObject var settings = AppSettings.shared
     @ObservedObject var bus = LauncherBus.shared
 
+    let pager: PagerController
     let size: CGSize
     let topInset: CGFloat
     var onLaunch: (String) -> Void
@@ -43,15 +124,13 @@ struct PagedLauncherView: View {
 
     @State private var pages: [[LaunchEntry]] = []
     @State private var previewPages: [[LaunchEntry]]?
-    @State private var currentPage = 0
+    @State private var reorder = PageStripReorder()
     @State private var draggingID: String?
     @State private var dragPoint: CGPoint = .zero
+    @State private var dragPresentation: PageDragPresentation?
     @State private var folderTargetID: String?
     @State private var lastPreviewKey: String?
-    @State private var swipeOffset: CGFloat = 0
-    @State private var swipeTargetOffset: CGFloat = 0
     @State private var lastEdgeFlip = Date.distantPast
-    @State private var entryFrames: [String: CGRect] = [:]
 
     @State private var presentedFolderID: String?
     @State private var folderReveal: CGFloat = 0
@@ -70,9 +149,8 @@ struct PagedLauncherView: View {
     private let columnGap: CGFloat = 16
     private let rowGap: CGFloat = 20
     private let canvasSpace = "paged-launcher"
-    private let spring = Animation.spring(response: 0.32, dampingFraction: 0.84)
     private let flow = Animation.spring(response: 0.24, dampingFraction: 0.80)
-    private let snap = Animation.interpolatingSpring(mass: 0.82, stiffness: 260, damping: 34, initialVelocity: 0)
+    private let dragPageSpring = Animation.spring(response: 0.32, dampingFraction: 0.84)
     private let folderOpenAnimation = Animation.interpolatingSpring(mass: 0.82, stiffness: 250, damping: 28, initialVelocity: 0.14)
     private let folderCloseAnimation = Animation.interpolatingSpring(mass: 0.90, stiffness: 330, damping: 34, initialVelocity: 0)
 
@@ -86,12 +164,21 @@ struct PagedLauncherView: View {
         settings.iconSize + (settings.showLabels ? 36 : 10)
     }
     private var activePages: [[LaunchEntry]] { previewPages ?? pages }
+    private var gridGeometry: PageGridGeometry {
+        PageGridGeometry(size: size, cell: CGSize(width: cellWidth, height: cellHeight),
+                         columns: columns, topInset: topInset, sidePadding: sidePadding,
+                         columnGap: columnGap, rowGap: rowGap)
+    }
+    private var floatingEntry: LaunchEntry? {
+        if let draggingID { return entry(with: draggingID, in: pages) }
+        return dragPresentation?.landingEntry
+    }
     private var pageCount: Int { max(1, activePages.count) }
     private var navigablePageCount: Int {
         max(pageCount, pages.count + (draggingID == nil ? 0 : 1), 1)
     }
     private var clampedPage: Int {
-        min(max(currentPage, 0), navigablePageCount - 1)
+        min(max(dragPresentation?.page ?? pager.state.targetPage, 0), navigablePageCount - 1)
     }
 
     private var placedEntries: [PlacedEntry] {
@@ -103,43 +190,91 @@ struct PagedLauncherView: View {
     }
 
     var body: some View {
-        let page = clampedPage
+        let _ = FrameMeter.noteBody(.paged)
         let indexMap = indexMap(for: activePages)
+        let entries = PageStripWindow.entries(
+            from: placedEntries,
+            activeLocations: indexMap,
+            restingPage: pager.state.restingPage,
+            draggingID: draggingID ?? dragPresentation?.landingEntry?.id
+        )
+        let positions = Dictionary(uniqueKeysWithValues: entries.map {
+            ($0.id, position(for: $0, indexMap: indexMap))
+        })
         let folderProgress = effectiveFolderReveal
 
         ZStack(alignment: .topLeading) {
-            Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture { onDismiss() }
+            PageStripRepresentable(
+                pager: pager,
+                size: size,
+                pageCount: navigablePageCount,
+                hitTestingEnabled: model.openFolderID == nil && presentedFolderID == nil
+                    && dragPresentation?.isSettling != true,
+                excludedRects: [
+                    CGRect(x: 0, y: 0, width: size.width, height: max(0, topInset - 4)),
+                    CGRect(x: 0, y: size.height - 32, width: size.width, height: 32)
+                ],
+                content: PageStripContent(
+                    model: model,
+                    entries: entries,
+                    positions: positions,
+                    reorder: reorder,
+                    size: CGSize(width: CGFloat(navigablePageCount) * size.width, height: size.height),
+                    geometry: gridGeometry,
+                    draggingID: draggingID,
+                    folderTargetID: folderTargetID,
+                    dragEnabled: model.openFolderID == nil && presentedFolderID == nil,
+                    folderProgress: folderProgress,
+                    hiddenForDrag: dragPresentation != nil,
+                    onLaunch: onLaunch,
+                    onDismiss: onDismiss,
+                    onDragChanged: { entry, stripPoint in
+                        let point = pager.viewportPoint(fromStrip: stripPoint)
+                        if draggingID == nil {
+                            beginDrag(entry, at: point)
+                        } else {
+                            dragPoint = point
+                            updateDrag(at: point)
+                        }
+                    },
+                    onDragEnded: { finishDrag(at: pager.viewportPoint(fromStrip: $0)) }
+                )
+            )
+            .frame(width: size.width, height: size.height)
+            .zIndex(0)
 
-            ZStack(alignment: .topLeading) {
-                ForEach(placedEntries) { placed in
-                    entryView(placed.entry)
-                        .frame(width: cellWidth, height: cellHeight)
-                        .position(position(for: placed, selectedPage: page, indexMap: indexMap))
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear.preference(
-                                    key: EntryFramePreference.self,
-                                    value: [placed.entry.id: proxy.frame(in: .named(canvasSpace))]
-                                )
-                            }
-                        )
-                        .zIndex(1)
+            if let presentation = dragPresentation {
+                PageDragGrid(entries: entries, positions: positions, geometry: gridGeometry,
+                             stripOffset: presentation.stripOffset,
+                             hiddenID: draggingID ?? presentation.landingEntry?.id) { placed in
+                    LauncherEntryView(model: model, entry: placed.entry, cell: gridGeometry.cell,
+                                      isDragging: false, isFolderTarget: placed.id == folderTargetID,
+                                      onLaunch: onLaunch)
+                        .equatable()
+                }
+                .zIndex(1)
+                .transition(.identity)
+                .onAppear {
+                    // Let the aligned first frame mount before starting any reflow.
+                    DispatchQueue.main.async {
+                        guard dragPresentation?.id == presentation.id, draggingID != nil else { return }
+                        animateDragPage(to: clampedPage)
+                        updateDrag(at: dragPoint)
+                    }
                 }
             }
-            .offset(x: swipeOffset)
-            .compositingGroup()
-            .blur(radius: 18 * folderProgress)
-            .saturation(Double(1 - 0.28 * folderProgress))
-            .brightness(Double(-0.16 * folderProgress))
-            .opacity(Double(1 - 0.58 * folderProgress))
-            .animation(.easeInOut(duration: 0.20), value: folderProgress)
 
-            if let draggingID, let dragged = entry(with: draggingID, in: pages) {
-                floatingEntryView(dragged)
+            if let dragged = floatingEntry {
+                floatingEntryView(dragged, isDragging: draggingID != nil)
                     .frame(width: cellWidth, height: cellHeight)
-                    .position(dragPoint)
+                    .position(dragPresentation?.landingPoint ?? dragPoint)
+                    .transaction {
+                        if draggingID != nil {
+                            $0.animation = nil
+                            $0.disablesAnimations = true
+                        }
+                    }
+                    .transition(.identity)
                     .zIndex(100)
                     .allowsHitTesting(false)
                     .blur(radius: 18 * folderProgress)
@@ -147,7 +282,8 @@ struct PagedLauncherView: View {
             }
 
             if navigablePageCount > 1 {
-                pageDots(selectedPage: page)
+                PageDotsView(state: pager.state, pageCount: pageCount, navigablePageCount: navigablePageCount,
+                             onSelect: { pager.snap(to: $0) })
                     .position(x: size.width / 2, y: size.height - 16)
                     .zIndex(10)
                     .blur(radius: 8 * folderProgress)
@@ -164,77 +300,31 @@ struct PagedLauncherView: View {
         .frame(width: size.width, height: size.height)
         .clipped()
         .coordinateSpace(name: canvasSpace)
-        .onPreferenceChange(EntryFramePreference.self) { entryFrames = $0 }
         .onAppear {
             pages = buildPages()
             previewPages = nil
-            currentPage = min(currentPage, max(0, pages.count - 1))
+            configurePager()
+            updatePagerLock()
         }
         .onChange(of: model.displayEntries) { _, _ in
-            guard draggingID == nil else { return }
+            guard dragPresentation == nil else { return }
             pages = buildPages()
             previewPages = nil
-            currentPage = min(currentPage, max(0, pages.count - 1))
+            configurePager()
         }
         .onChange(of: settings.columns) { _, _ in rebuildForGridChange() }
         .onChange(of: settings.rows) { _, _ in rebuildForGridChange() }
         .onChange(of: bus.resetTick) { _, _ in
             cancelDrag()
-            resetSwipe()
-            currentPage = 0
             pages = buildPages()
+            configurePager()
+            pager.jump(to: 0)
         }
-        .onChange(of: bus.nextPageTick) { _, _ in
-            withAnimation(spring) { currentPage = min(clampedPage + 1, navigablePageCount - 1) }
-        }
-        .onChange(of: bus.previousPageTick) { _, _ in
-            withAnimation(spring) { currentPage = max(clampedPage - 1, 0) }
-        }
-        .onChange(of: bus.liveScrollTick) { _, _ in
-            let next = constrainedSwipeOffset(swipeTargetOffset + bus.latestScrollDX * 1.14)
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                swipeTargetOffset = next
-                if abs(swipeOffset - next) > size.width * 0.18 {
-                    swipeOffset = next
-                }
-            }
-        }
-        .onChange(of: bus.displayFrameTick) { _, _ in
-            guard model.openFolderID == nil, presentedFolderID == nil else { return }
-            guard abs(swipeOffset - swipeTargetOffset) > 0.35 else {
-                swipeOffset = swipeTargetOffset
-                return
-            }
-            let dt = max(1.0 / 240.0, min(bus.displayFrameDuration, 1.0 / 30.0))
-            let blend = CGFloat(min(0.72, max(0.26, 1 - exp(-76 * dt))))
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                swipeOffset += (swipeTargetOffset - swipeOffset) * blend
-            }
-        }
-        .onChange(of: bus.endScrollTick) { _, _ in
-            let distanceThreshold = size.width * 0.13
-            let velocityThreshold: CGFloat = 3.4
-            let energyThreshold: CGFloat = 18
-            let settledOffset = abs(swipeTargetOffset) > abs(swipeOffset) ? swipeTargetOffset : swipeOffset
-            var page = clampedPage
-            let shouldAdvance = settledOffset <= -distanceThreshold
-                || bus.swipeVelocity <= -velocityThreshold
-                || bus.swipeEnergy <= -energyThreshold
-            let shouldGoBack = settledOffset >= distanceThreshold
-                || bus.swipeVelocity >= velocityThreshold
-                || bus.swipeEnergy >= energyThreshold
-            if shouldAdvance { page = min(page + 1, navigablePageCount - 1) }
-            if shouldGoBack { page = max(page - 1, 0) }
-            withAnimation(snap) {
-                currentPage = page
-                swipeTargetOffset = 0
-                swipeOffset = 0
-            }
-        }
+        .onChange(of: size) { _, _ in configurePager() }
+        .onChange(of: navigablePageCount) { _, _ in configurePager() }
+        .onChange(of: draggingID) { _, _ in updatePagerLock() }
+        .onChange(of: dragPresentation != nil) { _, _ in updatePagerLock() }
+        .onChange(of: presentedFolderID) { _, _ in updatePagerLock() }
         .onChange(of: model.openFolderID) { _, newValue in
             if let newValue {
                 presentFolder(newValue)
@@ -242,30 +332,20 @@ struct PagedLauncherView: View {
                 dismissPresentedFolder()
             }
             cancelDrag()
+            updatePagerLock()
         }
     }
 
-    @ViewBuilder private func entryView(_ entry: LaunchEntry) -> some View {
-        let isDragging = entry.id == draggingID
-        let isFolderTarget = entry.id == folderTargetID
-
-        let base = LauncherEntryView(
-            model: model,
-            entry: entry,
-            cell: CGSize(width: cellWidth, height: cellHeight),
-            isDragging: isDragging,
-            isFolderTarget: isFolderTarget,
-            onLaunch: onLaunch
-        )
-
-        if model.openFolderID == nil, presentedFolderID == nil {
-            base.highPriorityGesture(dragGesture(entry))
-        } else {
-            base
-        }
+    private func configurePager() {
+        pager.configure(pageWidth: size.width, pageCount: navigablePageCount)
     }
 
-    private func floatingEntryView(_ entry: LaunchEntry) -> some View {
+    private func updatePagerLock() {
+        pager.isLocked = dragPresentation != nil || draggingID != nil
+            || presentedFolderID != nil || model.openFolderID != nil
+    }
+
+    private func floatingEntryView(_ entry: LaunchEntry, isDragging: Bool) -> some View {
         LauncherEntryView(
             model: model,
             entry: entry,
@@ -274,30 +354,27 @@ struct PagedLauncherView: View {
             isFolderTarget: false,
             onLaunch: { _ in }
         )
-        .scaleEffect(1.13)
-        .shadow(color: .black.opacity(0.42), radius: 16, y: 8)
-    }
-
-    private func dragGesture(_ entry: LaunchEntry) -> some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .named(canvasSpace))
-            .onChanged { value in
-                if draggingID == nil {
-                    beginDrag(entry, at: value.location)
-                }
-                dragPoint = value.location
-                updateDrag(at: value.location)
-            }
-            .onEnded { value in
-                finishDrag(at: value.location)
-            }
+        .scaleEffect(isDragging ? 1.13 : 1)
+        .shadow(color: .black.opacity(isDragging ? 0.42 : 0), radius: isDragging ? 16 : 0,
+                y: isDragging ? 8 : 0)
     }
 
     private func beginDrag(_ entry: LaunchEntry, at point: CGPoint) {
-        guard model.openFolderID == nil, presentedFolderID == nil else { return }
-        pages = buildPages()
-        previewPages = nil
-        draggingID = entry.id
-        dragPoint = point
+        guard model.openFolderID == nil, presentedFolderID == nil, dragPresentation == nil else { return }
+        let page = clampedPage
+        // Read displayed geometry only at handoff, never in body or on paging frames.
+        let stripOffset = pager.stripPoint(fromViewport: .zero).x
+        withoutAnimation {
+            pages = buildPages()
+            previewPages = nil
+            draggingID = entry.id
+            dragPoint = point
+            dragPresentation = PageDragPresentation(page: page, stripOffset: stripOffset)
+            configurePager()
+            updatePagerLock()
+            // The hidden gesture host can rest at the destination while SwiftUI draws the move.
+            pager.jump(to: page)
+        }
     }
 
     private func updateDrag(at point: CGPoint) {
@@ -327,11 +404,22 @@ struct PagedLauncherView: View {
         lastPreviewKey = key
 
         withAnimation(flow) {
-            previewPages = reorderedPreview(draggingID: draggingID, target: target)
+            let preview = reorderedPreview(draggingID: draggingID, target: target)
+            reorder.record(from: activePages, to: preview)
+            previewPages = preview
         }
     }
 
     private func finishDrag(at point: CGPoint) {
+        guard let sessionID = dragPresentation?.id else { return }
+        withoutAnimation { dragPoint = point }
+        DispatchQueue.main.async {
+            guard dragPresentation?.id == sessionID, draggingID != nil else { return }
+            commitDrag(at: point, sessionID: sessionID)
+        }
+    }
+
+    private func commitDrag(at point: CGPoint, sessionID: UUID) {
         guard let draggingID else {
             cancelDrag()
             return
@@ -339,38 +427,115 @@ struct PagedLauncherView: View {
 
         let dropTargetID = folderTargetID ?? mergeTarget(at: point, excluding: draggingID)?.id
         if let dropTargetID, commitMergeToModel(draggingID: draggingID, targetID: dropTargetID) {
-            withAnimation(flow) {
-                pages = buildPages()
+            withAnimation(flow, completionCriteria: .removed) {
+                let merged = buildPages()
+                reorder.record(from: activePages, to: merged)
+                pages = merged
                 previewPages = nil
                 self.draggingID = nil
                 self.folderTargetID = nil
                 self.lastPreviewKey = nil
+                prepareDragSettlement(landingEntry: nil)
+            } completion: {
+                completeDragSettlement(sessionID: sessionID)
             }
             return
         }
 
         let target = reorderSlot(for: point, draggingID: draggingID)
         let committed = clean(previewPages ?? reorderedPreview(draggingID: draggingID, target: target))
-        withAnimation(flow) {
+        let releasedEntry = entry(with: draggingID, in: pages)
+        withAnimation(flow, completionCriteria: .removed) {
+            reorder.record(from: activePages, to: committed, releasedID: draggingID)
             pages = committed
             previewPages = nil
             self.draggingID = nil
             self.folderTargetID = nil
             self.lastPreviewKey = nil
+            prepareDragSettlement(landingEntry: releasedEntry)
+        } completion: {
+            completeDragSettlement(sessionID: sessionID)
         }
         model.commitPages(committed)
     }
 
-    private func cancelDrag() {
-        draggingID = nil
-        folderTargetID = nil
-        previewPages = nil
-        lastPreviewKey = nil
+    private func prepareDragSettlement(landingEntry: LaunchEntry?) {
+        guard var presentation = dragPresentation else { return }
+        let page = min(presentation.page, pageCount - 1)
+        presentation.isSettling = true
+        presentation.landingEntry = landingEntry
+        if let landingEntry, let location = locate(landingEntry.id, in: pages) {
+            presentation.landingPoint = gridGeometry.center(page: location.page, index: location.index,
+                                                            selectedPage: page)
+        }
+        if presentation.page != page {
+            presentation.page = page
+            presentation.stripOffset = CGFloat(page) * size.width
+            presentation.pageAnimationID = nil
+        }
+        dragPresentation = presentation
+        configurePager()
+        pager.jump(to: page)
     }
 
-    private func resetSwipe() {
-        swipeOffset = 0
-        swipeTargetOffset = 0
+    private func completeDragSettlement(sessionID: UUID) {
+        guard dragPresentation?.id == sessionID else { return }
+        dragPresentation?.dropAnimationFinished = true
+        returnToStripIfReady()
+    }
+
+    private func returnToStripIfReady() {
+        guard let presentation = dragPresentation, presentation.canReturnToStrip else { return }
+        withoutAnimation {
+            configurePager()
+            pager.jump(to: presentation.page)
+            dragPresentation = nil
+            updatePagerLock()
+        }
+    }
+
+    private func animateDragPage(to page: Int) {
+        guard let presentation = dragPresentation else { return }
+        let offset = CGFloat(page) * size.width
+        guard presentation.stripOffset != offset else { return }
+        let animationID = UUID()
+        dragPresentation?.pageAnimationID = animationID
+        withAnimation(dragPageSpring, completionCriteria: .removed) {
+            dragPresentation?.page = page
+            dragPresentation?.stripOffset = offset
+        } completion: {
+            guard dragPresentation?.id == presentation.id,
+                  dragPresentation?.pageAnimationID == animationID else { return }
+            dragPresentation?.pageAnimationID = nil
+            returnToStripIfReady()
+        }
+        configurePager()
+        pager.jump(to: page)
+    }
+
+    private func withoutAnimation(_ changes: () -> Void) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction, changes)
+    }
+
+    private func cancelDrag() {
+        guard let presentation = dragPresentation else {
+            draggingID = nil
+            folderTargetID = nil
+            previewPages = nil
+            lastPreviewKey = nil
+            return
+        }
+        withoutAnimation {
+            draggingID = nil
+            folderTargetID = nil
+            previewPages = nil
+            lastPreviewKey = nil
+            dragPresentation = nil
+            configurePager()
+            pager.jump(to: presentation.page)
+        }
     }
 
     private var clampedFolderReveal: CGFloat {
@@ -449,69 +614,44 @@ struct PagedLauncherView: View {
 
     private func sourceFrame(forFolderID folderID: String) -> CGRect {
         let entryID = "folder:" + folderID
-        if let frame = entryFrames[entryID],
-           !frame.isNull,
-           frame.width > 0,
-           frame.height > 0,
-           frame.width <= cellWidth * 1.8,
-           frame.height <= cellHeight * 1.8 {
-            return frame
-        }
         if let located = locate(entryID, in: pages) {
-            let center = center(page: located.page, index: located.index, selectedPage: clampedPage)
-            return CGRect(
-                x: center.x + swipeOffset - cellWidth / 2,
+            let center = center(page: located.page, index: located.index, selectedPage: 0)
+            return pager.viewportRect(fromStrip: CGRect(
+                x: center.x - cellWidth / 2,
                 y: center.y - cellHeight / 2,
                 width: cellWidth,
                 height: cellHeight
-            )
+            ))
         }
-        return CGRect(x: size.width / 2 - 40, y: size.height / 2 - 40, width: 80, height: 80)
+        return fallbackFolderSourceFrame
     }
 
-    private func constrainedSwipeOffset(_ rawOffset: CGFloat) -> CGFloat {
-        let limit = max(96, size.width * 0.30)
-        if clampedPage == 0 && rawOffset > 0 {
-            return rubberBand(rawOffset, limit: limit)
-        }
-        if clampedPage >= navigablePageCount - 1 && rawOffset < 0 {
-            return -rubberBand(-rawOffset, limit: limit)
-        }
-        return rawOffset
-    }
-
-    private func rubberBand(_ offset: CGFloat, limit: CGFloat) -> CGFloat {
-        guard offset > 0, limit > 0 else { return 0 }
-        return (limit * offset) / (limit + offset)
+    private var fallbackFolderSourceFrame: CGRect {
+        CGRect(x: size.width / 2 - 40, y: size.height / 2 - 40, width: 80, height: 80)
     }
 
     private func flipPage(direction: Int) {
         guard Date().timeIntervalSince(lastEdgeFlip) > 0.55 else { return }
         let next = min(max(clampedPage + direction, 0), navigablePageCount - 1)
-        guard next != currentPage else { return }
+        guard next != clampedPage else { return }
         if next >= pages.count {
             var expanded = previewPages ?? pages
             while next >= expanded.count { expanded.append([]) }
             previewPages = expanded
         }
-        withAnimation(spring) { currentPage = next }
+        if dragPresentation != nil {
+            animateDragPage(to: next)
+        } else {
+            pager.snap(to: next)
+        }
         lastEdgeFlip = Date()
     }
 
     private func position(
         for placed: PlacedEntry,
-        selectedPage: Int,
         indexMap: [String: (page: Int, index: Int)]
     ) -> CGPoint {
-        if placed.entry.id == draggingID {
-            return center(page: placed.page, index: placed.index, selectedPage: selectedPage)
-        }
-
-        if let located = indexMap[placed.entry.id] {
-            return center(page: located.page, index: located.index, selectedPage: selectedPage)
-        }
-
-        return center(page: placed.page, index: placed.index, selectedPage: selectedPage)
+        gridGeometry.position(for: placed, indexMap: indexMap, draggingID: draggingID)
     }
 
     private func indexMap(for layout: [[LaunchEntry]]) -> [String: (page: Int, index: Int)] {
@@ -526,12 +666,7 @@ struct PagedLauncherView: View {
     }
 
     private func center(page: Int, index: Int, selectedPage: Int) -> CGPoint {
-        let row = index / columns
-        let column = index % columns
-        let pageOffset = (CGFloat(page) - CGFloat(selectedPage)) * size.width
-        let x = pageOffset + sidePadding + CGFloat(column) * (cellWidth + columnGap) + cellWidth / 2
-        let y = topInset + CGFloat(row) * (cellHeight + rowGap) + cellHeight / 2
-        return CGPoint(x: x, y: y)
+        gridGeometry.center(page: page, index: index, selectedPage: selectedPage)
     }
 
     private func targetSlot(for point: CGPoint) -> (page: Int, index: Int) {
@@ -636,37 +771,7 @@ struct PagedLauncherView: View {
     }
 
     private func reorderedPreview(draggingID: String, target: (page: Int, index: Int)) -> [[LaunchEntry]] {
-        var result = pages
-        guard let source = removeEntry(draggingID, from: &result) else { return result }
-
-        var target = target
-        while target.page >= result.count { result.append([]) }
-        target.index = min(max(target.index, 0), result[target.page].count)
-        result[target.page].insert(source, at: target.index)
-        cascadeOverflow(&result)
-        return result
-    }
-
-    private func mergedPages(draggingID: String, targetID: String) -> [[LaunchEntry]]? {
-        var result = pages
-        guard let dragged = removeEntry(draggingID, from: &result),
-              case .app(let draggedAppID) = dragged,
-              let target = locate(targetID, in: result) else { return nil }
-
-        let targetEntry = result[target.page][target.index]
-        switch targetEntry {
-        case .app(let targetAppID):
-            result[target.page][target.index] = .folder(
-                FolderRecord(name: "未命名", appIDs: [targetAppID, draggedAppID])
-            )
-        case .folder(var folder):
-            if !folder.appIDs.contains(draggedAppID) {
-                folder.appIDs.append(draggedAppID)
-            }
-            result[target.page][target.index] = .folder(folder)
-        }
-
-        return result
+        PageStripReordering.preview(pages: pages, draggingID: draggingID, target: target, perPage: perPage)
     }
 
     private func removeEntry(_ id: String, from pages: inout [[LaunchEntry]]) -> LaunchEntry? {
@@ -693,15 +798,7 @@ struct PagedLauncherView: View {
     }
 
     private func cascadeOverflow(_ layout: inout [[LaunchEntry]]) {
-        var page = 0
-        while page < layout.count {
-            while layout[page].count > perPage {
-                let overflow = layout[page].removeLast()
-                if page + 1 >= layout.count { layout.append([]) }
-                layout[page + 1].insert(overflow, at: 0)
-            }
-            page += 1
-        }
+        PageStripReordering.cascadeOverflow(&layout, perPage: perPage)
     }
 
     private func clean(_ layout: [[LaunchEntry]]) -> [[LaunchEntry]] {
@@ -745,21 +842,7 @@ struct PagedLauncherView: View {
         guard draggingID == nil else { return }
         pages = buildPages()
         previewPages = nil
-        currentPage = min(currentPage, max(0, pages.count - 1))
-    }
-
-    private func pageDots(selectedPage: Int) -> some View {
-        HStack(spacing: 10) {
-            ForEach(0..<navigablePageCount, id: \.self) { index in
-                Circle()
-                    .fill(.white.opacity(index == selectedPage ? 0.94 : (index >= pageCount ? 0.18 : 0.36)))
-                    .frame(width: 7, height: 7)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(spring) { currentPage = index }
-                    }
-            }
-        }
+        configurePager()
     }
 
     private func currentFolder(_ id: String) -> FolderRecord? {
@@ -772,7 +855,7 @@ struct PagedLauncherView: View {
         let apps = model.apps(in: folder)
         let metrics = folderPanelMetrics(appCount: apps.count)
         let progress = effectiveFolderReveal
-        let sourceFrame = folderSourceFrame ?? sourceFrame(forFolderID: folder.id)
+        let sourceFrame = folderSourceFrame ?? fallbackFolderSourceFrame
         let targetCenter = CGPoint(x: size.width / 2, y: size.height / 2)
         let sourceCenter = CGPoint(x: sourceFrame.midX, y: sourceFrame.midY)
         let contentHeight = metrics.visiblePanelHeight + 42
@@ -872,7 +955,6 @@ struct PagedLauncherView: View {
         return FolderPanelMetrics(
             cell: cell,
             columns: columns,
-            rows: rows,
             horizontalSpacing: horizontalSpacing,
             verticalSpacing: verticalSpacing,
             panelWidth: panelWidth,
@@ -1076,7 +1158,9 @@ struct PagedLauncherView: View {
         cascadeOverflow(&layout)
 
         withAnimation(flow) {
-            previewPages = clean(layout)
+            let preview = clean(layout)
+            reorder.record(from: activePages, to: preview)
+            previewPages = preview
         }
     }
 

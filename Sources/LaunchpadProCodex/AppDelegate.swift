@@ -134,12 +134,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func rescan() {
-        model.reload()
+        model.reloadAsync(force: true)
     }
 
     private func setupAppDirectoryWatcher() {
         let watcher = AppDirectoryWatcher { [weak self] in
-            self?.model.reload()
+            self?.model.reloadAsync()
         }
         watcher.start(watching: AppScanner.watchedDirectories)
         appDirectoryWatcher = watcher

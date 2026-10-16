@@ -16,6 +16,7 @@ struct LauncherRootView: View {
     @ObservedObject var settings = AppSettings.shared
     @ObservedObject private var bus = LauncherBus.shared
 
+    let pager: PagerController
     var onDismiss: () -> Void
     var onOpenSettings: () -> Void
     var onRescan: () -> Void
@@ -30,6 +31,7 @@ struct LauncherRootView: View {
     }
 
     var body: some View {
+        let _ = FrameMeter.noteBody(.root)
         ZStack(alignment: .top) {
             Color.black.opacity(settings.backgroundDim)
                 .ignoresSafeArea()
@@ -38,6 +40,7 @@ struct LauncherRootView: View {
 
             LauncherBody(
                 model: model,
+                pager: pager,
                 topInset: topInset + 54,
                 onLaunch: { id in
                     model.launch(id)
@@ -90,6 +93,7 @@ private struct LauncherBody: View {
     @ObservedObject var model: LaunchModel
     @ObservedObject var settings = AppSettings.shared
 
+    let pager: PagerController
     let topInset: CGFloat
     var onLaunch: (String) -> Void
     var onDismiss: () -> Void
@@ -111,6 +115,7 @@ private struct LauncherBody: View {
             } else {
                 PagedLauncherView(
                     model: model,
+                    pager: pager,
                     size: geometry.size,
                     topInset: topInset,
                     onLaunch: onLaunch,
@@ -510,7 +515,14 @@ private struct VerticalLauncherGrid: View {
     }
 }
 
-struct LauncherEntryView: View {
+struct LauncherEntryView: View, Equatable {
+    struct RenderInput: Equatable {
+        let entry: LaunchEntry
+        let cell: CGSize
+        var isDragging: Bool
+        var isFolderTarget: Bool
+    }
+
     @ObservedObject var model: LaunchModel
 
     let entry: LaunchEntry
@@ -518,6 +530,14 @@ struct LauncherEntryView: View {
     var isDragging: Bool
     var isFolderTarget: Bool
     var onLaunch: (String) -> Void
+
+    static func == (lhs: LauncherEntryView, rhs: LauncherEntryView) -> Bool {
+        lhs.renderInput == rhs.renderInput
+    }
+
+    private var renderInput: RenderInput {
+        RenderInput(entry: entry, cell: cell, isDragging: isDragging, isFolderTarget: isFolderTarget)
+    }
 
     var body: some View {
         Group {
