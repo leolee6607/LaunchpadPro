@@ -16,6 +16,18 @@ EXPORT_OPTIONS="Support/ExportOptions-DeveloperID.plist"
 UPLOAD_FOR_NOTARIZATION="${UPLOAD_FOR_NOTARIZATION:-0}"
 USE_NOTARIZED_APP="${USE_NOTARIZED_APP:-0}"
 
+# With ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_PATH set (an App Store Connect API
+# key), signing and provisioning authenticate with that key instead of the
+# account signed in to Xcode.
+AUTH_ARGS=()
+if [[ -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" && -n "${ASC_KEY_PATH:-}" ]]; then
+    AUTH_ARGS=(
+        -authenticationKeyPath "${ASC_KEY_PATH}"
+        -authenticationKeyID "${ASC_KEY_ID}"
+        -authenticationKeyIssuerID "${ASC_ISSUER_ID}"
+    )
+fi
+
 rm -rf "${STAGING_DIR}"
 mkdir -p "build/archives"
 
@@ -30,6 +42,7 @@ if [[ "${USE_NOTARIZED_APP}" != "1" ]]; then
         -destination "generic/platform=macOS" \
         -archivePath "${ARCHIVE_PATH}" \
         -allowProvisioningUpdates \
+        "${AUTH_ARGS[@]}" \
         ARCHS="arm64 x86_64" \
         ONLY_ACTIVE_ARCH=NO \
         archive
@@ -40,7 +53,8 @@ if [[ "${USE_NOTARIZED_APP}" != "1" ]]; then
         -archivePath "${ARCHIVE_PATH}" \
         -exportPath "${EXPORT_PATH}" \
         -exportOptionsPlist "${EXPORT_OPTIONS}" \
-        -allowProvisioningUpdates
+        -allowProvisioningUpdates \
+        "${AUTH_ARGS[@]}"
 fi
 
 # With NOTARY_PROFILE set (a keychain profile created via
@@ -77,7 +91,8 @@ elif [[ "${UPLOAD_FOR_NOTARIZATION}" == "1" ]]; then
         -archivePath "${ARCHIVE_PATH}" \
         -exportPath "build/upload-xcode" \
         -exportOptionsPlist "${upload_options}" \
-        -allowProvisioningUpdates
+        -allowProvisioningUpdates \
+        "${AUTH_ARGS[@]}"
     rm -f "${upload_options}"
 
     echo "==> notarization submitted; rerun with USE_NOTARIZED_APP=1 after processing finishes"
