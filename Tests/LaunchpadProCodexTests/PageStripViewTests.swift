@@ -6,6 +6,141 @@ import XCTest
 @testable import LaunchpadProCodex
 
 final class PageStripViewTests: XCTestCase {
+    @MainActor func testDragGridPositionsMatchStripForEveryEntryAndPreview() {
+        let pages: [[LaunchEntry]] = (0..<5).map { page in
+            (0..<12).map { .app("\(page)-\($0)") }
+        }
+        let entries = pages.enumerated().flatMap { page, items in
+            items.enumerated().map { PlacedEntry(page: page, index: $0.offset, entry: $0.element) }
+        }
+        let draggedID = pages[0][3].id
+        let previews = [pages,
+            PageStripReordering.preview(pages: pages, draggingID: draggedID, target: (2, 5), perPage: 12),
+            PageStripReordering.preview(pages: pages, draggingID: draggedID, target: (5, 0), perPage: 12)]
+        for width: CGFloat in [800, 1512, 1728.5] {
+            let geometry = PageGridGeometry(size: CGSize(width: width, height: 982),
+                cell: CGSize(width: (width - 104 - 5 * 16) / 6, height: 116),
+                columns: 6, topInset: 123.5, sidePadding: 52, columnGap: 16, rowGap: 20)
+            let pager = PagerController()
+            let container = PageStripContainerView(frame: CGRect(origin: .zero, size: geometry.size))
+            pager.attach(container)
+            defer { pager.detach(container) }
+            pager.configure(pageWidth: width, pageCount: 6)
+            for preview in previews {
+                let locations = PageStripReordering.locations(in: preview)
+                let map = locations.mapValues { (page: $0.page, index: $0.index) }
+                for selectedPage in 0..<6 {
+                    pager.jump(to: selectedPage)
+                    for placed in entries {
+                        let strip = geometry.position(for: placed, indexMap: map, draggingID: draggedID)
+                        let outer = PageGridGeometry.viewportPosition(strip, stripOffset: CGFloat(selectedPage) * width)
+                        XCTAssertEqual(outer, pager.viewportPoint(fromStrip: strip))
+                        let location = placed.id == draggedID ? (placed.page, placed.index) : map[placed.id]!
+                        // Independent cf82acc formula, including cell center and viewport origin.
+                        XCTAssertEqual(outer.x, CGFloat(location.0 - selectedPage) * width + 52
+                            + CGFloat(location.1 % 6) * (geometry.cell.width + 16) + geometry.cell.width / 2,
+                            accuracy: 1e-9)
+                        XCTAssertEqual(outer.y, 123.5 + CGFloat(location.1 / 6) * 136 + 58, accuracy: 1e-9)
+                    }
+                }
+                // A drag may take over halfway through an AppKit swipe/snap.
+                pager.jump(to: 2)
+                pager.handleScroll(dx: -137.25, dy: 0, phase: .began, time: 10)
+                let capturedOffset = pager.stripPoint(fromViewport: .zero).x
+                for placed in entries {
+                    let position = geometry.position(for: placed, indexMap: map, draggingID: draggedID)
+                    XCTAssertEqual(PageGridGeometry.viewportPosition(position, stripOffset: capturedOffset),
+                                   pager.viewportPoint(fromStrip: position))
+                }
+                pager.stop()
+            }
+        }
+    }
+
+    @MainActor func testDragGridAndStripRenderIdenticalPixelsAtHandoff() throws {
+        let geometry = PageGridGeometry(size: CGSize(width: 400, height: 240),
+            cell: CGSize(width: 64, height: 72), columns: 4, topInset: 24,
+            sidePadding: 40, columnGap: 16, rowGap: 20)
+        let entries = (0..<3).flatMap { page in
+            (0..<8).map { PlacedEntry(page: page, index: $0, entry: .app("\(page)-\($0)")) }
+        }
+        let positions = Dictionary(uniqueKeysWithValues: entries.map {
+            ($0.id, geometry.position(for: $0, indexMap: [:], draggingID: nil))
+        })
+        func tile(_ entry: PlacedEntry) -> some View {
+            VStack(spacing: 4) {
+                Color.red.frame(width: 24, height: 24)
+                Color.blue.frame(width: 40, height: 8)
+            }
+        }
+        func pixels<V: View>(_ view: V) throws -> Data {
+            let renderer = ImageRenderer(content: view.frame(width: 400, height: 240).clipped())
+            renderer.scale = 2
+            return try XCTUnwrap(try XCTUnwrap(renderer.cgImage).dataProvider?.data) as Data
+        }
+        for offset: CGFloat in [0, 400, 800, 537.25] {
+            let outer = PageDragGrid(entries: entries, positions: positions, geometry: geometry,
+                                     stripOffset: offset, hiddenID: nil, entryContent: tile)
+            // AppKit bounds translation is equivalent to moving the whole strip by -offset.
+            let strip = ZStack(alignment: .topLeading) {
+                ForEach(entries) { placed in
+                    tile(placed).frame(width: geometry.cell.width, height: geometry.cell.height)
+                        .position(positions[placed.id]!)
+                }
+            }
+            .frame(width: 400, height: 240, alignment: .topLeading)
+            .offset(x: -offset)
+            XCTAssertEqual(try pixels(outer), try pixels(strip), "Offset \(offset)")
+        }
+    }
+
+    @MainActor func testHidingStripRetainsGestureOwnerAndAppKitHitRouting() throws {
+        let state = DragVisibilityProbeState()
+        let parent = FlippedTestView(frame: CGRect(x: 0, y: 0, width: 400, height: 240))
+        let container = PageStripContainerView(frame: parent.bounds)
+        let host = NSHostingView(rootView: DragVisibilityProbe(state: state))
+        host.sizingOptions = []
+        host.safeAreaRegions = []
+        host.frame = parent.bounds
+        parent.addSubview(container)
+        container.addSubview(host)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(state.appearances, 1)
+        let owner = try XCTUnwrap(state.owner)
+        for hidden in [true, false, true, false] {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { state.hidden = hidden }
+            host.layoutSubtreeIfNeeded()
+            XCTAssertTrue(state.owner === owner)
+            XCTAssertTrue(owner.isDescendant(of: host))
+            XCTAssertEqual(state.appearances, 1)
+            XCTAssertEqual(state.disappearances, 0)
+            XCTAssertFalse(host.isHidden)
+            XCTAssertEqual(host.alphaValue, 1)
+            XCTAssertTrue(container.hitTestingEnabled)
+            XCTAssertNotNil(container.hitTest(CGPoint(x: 120, y: 80)))
+        }
+    }
+
+    func testDropWaitsForBothReflowAndPageAnimationBeforeReturningToStrip() {
+        for pageFinishesFirst in [true, false] {
+            var presentation = PageDragPresentation(page: 2, stripOffset: 3024)
+            presentation.pageAnimationID = UUID()
+            XCTAssertFalse(presentation.canReturnToStrip)
+            presentation.isSettling = true
+            if pageFinishesFirst {
+                presentation.pageAnimationID = nil
+            } else {
+                presentation.dropAnimationFinished = true
+            }
+            XCTAssertFalse(presentation.canReturnToStrip)
+            presentation.pageAnimationID = nil
+            presentation.dropAnimationFinished = true
+            XCTAssertTrue(presentation.canReturnToStrip)
+        }
+    }
+
     func testPreviewMovesOnlyContiguousRangeOnSamePage() {
         let pages: [[LaunchEntry]] = (0..<3).map { page in
             (0..<8).map { .app("\(page)-\($0)") }
@@ -546,6 +681,42 @@ final class PageStripViewTests: XCTestCase {
         XCTAssertFalse(pager.isLocked)
         pager.detach(container)
     }
+}
+
+@MainActor
+private final class DragVisibilityProbeState: ObservableObject {
+    @Published var hidden = false
+    var appearances = 0
+    var disappearances = 0
+    weak var owner: NSView?
+}
+
+private struct DragVisibilityProbe: View {
+    @ObservedObject var state: DragVisibilityProbeState
+
+    var body: some View {
+        ZStack {
+            Color.clear.contentShape(Rectangle()).onTapGesture {}
+            GestureOwnerProbe(state: state)
+                .frame(width: 100, height: 100)
+                .highPriorityGesture(DragGesture(minimumDistance: 8).onChanged { _ in }.onEnded { _ in })
+                .onAppear { state.appearances += 1 }
+                .onDisappear { state.disappearances += 1 }
+        }
+        .modifier(PageStripDragVisibility(hidden: state.hidden))
+    }
+}
+
+private struct GestureOwnerProbe: NSViewRepresentable {
+    let state: DragVisibilityProbeState
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        state.owner = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {}
 }
 
 private struct LayoutAnimationProbe: View {

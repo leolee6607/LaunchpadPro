@@ -71,6 +71,46 @@ struct PageStripEntryPlacement: ViewModifier {
     }
 }
 
+/// Hide SwiftUI drawing, not the NSView: AppKit alpha/isHidden changes can stop
+/// routing events to the hosting view that owns the ongoing drag.
+struct PageStripDragVisibility: ViewModifier {
+    let hidden: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(hidden ? 0 : 1)
+            .animation(nil, value: hidden)
+    }
+}
+
+struct PageDragGrid<EntryContent: View>: View {
+    let entries: [PlacedEntry]
+    let positions: [String: CGPoint]
+    let geometry: PageGridGeometry
+    let stripOffset: CGFloat
+    let hiddenID: String?
+    @ViewBuilder var entryContent: (PlacedEntry) -> EntryContent
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(entries) { placed in
+                entryContent(placed)
+                    .frame(width: geometry.cell.width, height: geometry.cell.height)
+                    .opacity(placed.id == hiddenID ? 0 : 1)
+                    .transaction { $0.animation = nil }
+                    .position(PageGridGeometry.viewportPosition(
+                        positions[placed.id] ?? geometry.center(page: placed.page, index: placed.index),
+                        stripOffset: stripOffset
+                    ))
+                    .transition(.identity)
+            }
+        }
+        .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 enum PageStripWindow {
     static func entries(
         from entries: [PlacedEntry],
@@ -92,6 +132,7 @@ final class PageStripContainerView: NSView {
     var hitTestingEnabled = true
     var excludedRects: [CGRect] = []
     private(set) var hostingView: StripHostingView?
+    var lastSignature: PageStripContent.RenderSignature?
 
     override var isFlipped: Bool { true }
     override var wantsUpdateLayer: Bool { true }
@@ -107,8 +148,12 @@ final class PageStripContainerView: NSView {
 
     override func updateLayer() {}
 
+    private(set) var store: PageStripStore?
+
     func install(content: PageStripContent, size: CGSize) {
-        let host = StripHostingView(rootView: content)
+        let store = PageStripStore(content: content)
+        self.store = store
+        let host = StripHostingView(rootView: PageStripRoot(store: store))
         host.sizingOptions = []
         host.safeAreaRegions = []
         host.frame = CGRect(origin: .zero, size: size)
@@ -134,8 +179,22 @@ final class PageStripContainerView: NSView {
     }
 }
 
+/// The strip's hosting view is created once; later content arrives through this
+/// store so SwiftUI diffs it as an ordinary in-graph update instead of a
+/// rootView replacement (which cut in-flight reflow springs).
 @MainActor
-final class StripHostingView: NSHostingView<PageStripContent> {
+final class PageStripStore: ObservableObject {
+    @Published var content: PageStripContent
+    init(content: PageStripContent) { self.content = content }
+}
+
+struct PageStripRoot: View {
+    @ObservedObject var store: PageStripStore
+    var body: some View { store.content }
+}
+
+@MainActor
+final class StripHostingView: NSHostingView<PageStripRoot> {
     override var acceptsFirstResponder: Bool { false }
 }
 
@@ -153,8 +212,9 @@ struct PageStripRepresentable: NSViewRepresentable {
         let view = PageStripContainerView(frame: CGRect(origin: .zero, size: size))
         var root = content
         root.dimAnimated = !context.transaction.disablesAnimations
-        root.reorderAnimationsDisabled = context.transaction.disablesAnimations
+        root.reorderAnimationsDisabled = context.transaction.disablesAnimations || root.hiddenForDrag
         view.install(content: root, size: stripSize)
+        view.lastSignature = root.renderSignature
         view.hitTestingEnabled = hitTestingEnabled
         view.excludedRects = excludedRects
         pager.attach(view)
@@ -167,9 +227,15 @@ struct PageStripRepresentable: NSViewRepresentable {
         view.excludedRects = excludedRects
         var root = content
         root.dimAnimated = !context.transaction.disablesAnimations
-        root.reorderAnimationsDisabled = context.transaction.disablesAnimations
+        root.reorderAnimationsDisabled = context.transaction.disablesAnimations || root.hiddenForDrag
+        // Re-assigning rootView on every pointer move (the outer view re-renders
+        // with each drag event) cuts in-flight reflow springs inside the host.
+        // Only hand over content when something the strip renders has changed.
+        let signature = root.renderSignature
+        guard signature != view.lastSignature else { return }
+        view.lastSignature = signature
         withTransaction(context.transaction) {
-            view.hostingView?.rootView = root
+            view.store?.content = root
         }
     }
 
@@ -188,17 +254,53 @@ struct PageStripContent: View {
     let positions: [String: CGPoint]
     let reorder: PageStripReorder
     let size: CGSize
-    let cell: CGSize
+    let geometry: PageGridGeometry
+    private var cell: CGSize { geometry.cell }
     let draggingID: String?
     let folderTargetID: String?
     let dragEnabled: Bool
     let folderProgress: CGFloat
+    var hiddenForDrag = false
     var dimAnimated = true
     var reorderAnimationsDisabled = false
     var onLaunch: (String) -> Void
     var onDismiss: () -> Void
     var onDragChanged: (LaunchEntry, CGPoint) -> Void
     var onDragEnded: (CGPoint) -> Void
+
+    struct RenderSignature: Equatable {
+        let ids: [String]
+        let coordinates: [CGFloat]
+        let tokens: [UInt64]
+        let entryHashes: [Int]
+        let draggingID: String?
+        let folderTargetID: String?
+        let dragEnabled: Bool
+        let folderProgress: CGFloat
+        let size: CGSize
+        let cell: CGSize
+        let dimAnimated: Bool
+        let reorderAnimationsDisabled: Bool
+        let hiddenForDrag: Bool
+    }
+
+    var renderSignature: RenderSignature {
+        RenderSignature(
+            ids: entries.map(\.id),
+            coordinates: entries.flatMap { [positions[$0.id]?.x ?? -1, positions[$0.id]?.y ?? -1] },
+            tokens: entries.map { reorder.token(for: $0.id) },
+            entryHashes: entries.map { $0.entry.hashValue },
+            draggingID: draggingID,
+            folderTargetID: folderTargetID,
+            dragEnabled: dragEnabled,
+            folderProgress: folderProgress,
+            size: size,
+            cell: cell,
+            dimAnimated: dimAnimated,
+            reorderAnimationsDisabled: reorderAnimationsDisabled,
+            hiddenForDrag: hiddenForDrag
+        )
+    }
 
     var body: some View {
         let _ = FrameMeter.noteBody(.strip)
@@ -220,7 +322,7 @@ struct PageStripContent: View {
                 .highPriorityGesture(dragGesture(placed.entry), including: dragEnabled ? .all : .none)
                 .frame(width: cell.width, height: cell.height)
                 .modifier(PageStripEntryPlacement(
-                    position: positions[placed.id] ?? .zero,
+                    position: positions[placed.id] ?? geometry.center(page: placed.page, index: placed.index),
                     reorderToken: reorder.token(for: placed.id),
                     isDragging: placed.id == draggingID,
                     animationsDisabled: reorderAnimationsDisabled
@@ -235,6 +337,7 @@ struct PageStripContent: View {
         .brightness(Double(-0.16 * folderProgress))
         .opacity(Double(1 - 0.58 * folderProgress))
         .animation(dimAnimated ? .easeInOut(duration: 0.20) : nil, value: folderProgress)
+        .modifier(PageStripDragVisibility(hidden: hiddenForDrag))
         .ignoresSafeArea()
     }
 
