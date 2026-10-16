@@ -1,10 +1,140 @@
 import AppKit
 import Observation
 import QuartzCore
+import SwiftUI
 import XCTest
 @testable import LaunchpadProCodex
 
 final class PageStripViewTests: XCTestCase {
+    func testLayoutSignatureTracksPreviewAndReleaseWithUnchangedOrder() {
+        let original: [[LaunchEntry]] = [[.app("a"), .app("b"), .app("c")]]
+        let preview: [[LaunchEntry]] = [[.app("b"), .app("c"), .app("a")]]
+        let dragging = PageStripLayoutSignature(pages: original, draggingID: "app:a")
+        let yielding = PageStripLayoutSignature(pages: preview, draggingID: "app:a")
+        let released = PageStripLayoutSignature(pages: preview, draggingID: nil)
+
+        XCTAssertNotEqual(dragging, yielding)
+        XCTAssertEqual(yielding.entryIDs, released.entryIDs)
+        XCTAssertNotEqual(yielding, released)
+        XCTAssertEqual(released, PageStripLayoutSignature(pages: preview, draggingID: nil))
+    }
+
+    func testLayoutSignatureTracksFolderMergeAndPageBoundaries() {
+        let folder = FolderRecord(id: "folder", name: "Tools", appIDs: ["b", "c"])
+        let before = PageStripLayoutSignature(pages: [[.app("a"), .folder(folder), .app("d")]],
+                                             draggingID: "app:a")
+        let merged = PageStripLayoutSignature(pages: [[.folder(folder), .app("d")]], draggingID: nil)
+        let split = PageStripLayoutSignature(pages: [[.folder(folder)], [.app("d")]], draggingID: nil)
+
+        XCTAssertNotEqual(before, merged)
+        XCTAssertEqual(merged.entryIDs.flatMap { $0 }, split.entryIDs.flatMap { $0 })
+        XCTAssertNotEqual(merged, split)
+        let renamed = FolderRecord(id: "folder", name: "Renamed", appIDs: ["a", "b", "c"])
+        XCTAssertEqual(merged, PageStripLayoutSignature(pages: [[.folder(renamed), .app("d")]], draggingID: nil))
+    }
+
+    func testLayoutSignatureDoesNotDependOnPageWindow() {
+        let pages: [[LaunchEntry]] = (0..<8).map { [.app("\($0)")] }
+        let entries = pages.enumerated().map { PlacedEntry(page: $0.offset, index: 0, entry: $0.element[0]) }
+        let signature = PageStripLayoutSignature(pages: pages, draggingID: nil)
+        let firstWindow = PageStripWindow.entries(from: entries, activeLocations: [:],
+                                                  restingPage: 0, draggingID: nil)
+        let lastWindow = PageStripWindow.entries(from: entries, activeLocations: [:],
+                                                 restingPage: 7, draggingID: nil)
+
+        XCTAssertNotEqual(firstWindow.map(\.id), lastWindow.map(\.id))
+        XCTAssertEqual(signature, PageStripLayoutSignature(pages: pages, draggingID: nil))
+    }
+
+    @MainActor func testHostingRootReplacementAnimatesPreviewReleaseAndMerge() {
+        let flow = Animation.spring(response: 0.24, dampingFraction: 0.80)
+        let layouts = [
+            PageStripLayoutSignature(pages: [[.app("a"), .app("b"), .app("c")]], draggingID: "app:a"),
+            PageStripLayoutSignature(pages: [[.app("b"), .app("a"), .app("c")]], draggingID: "app:a"),
+            PageStripLayoutSignature(pages: [[.app("b"), .app("a"), .app("c")]], draggingID: nil),
+            PageStripLayoutSignature(pages: [[.folder(FolderRecord(id: "f", name: "F", appIDs: ["a", "b"])), .app("c")]],
+                                     draggingID: nil)
+        ]
+        var observed: [Animation?] = []
+        func probe(_ index: Int) -> LayoutAnimationProbe {
+            LayoutAnimationProbe(signature: layouts[index], transaction: Transaction(animation: flow),
+                                 position: CGFloat(index * 20), record: { observed.append($0.animation) })
+        }
+        let host = NSHostingView(rootView: probe(0))
+        host.frame = CGRect(x: 0, y: 0, width: 400, height: 100)
+        host.layoutSubtreeIfNeeded()
+        // SwiftUI may omit the transaction callback on an unanimated initial layout.
+        XCTAssertTrue(observed.allSatisfy { $0 == nil }, "First display must not animate")
+
+        for index in 1..<layouts.count {
+            observed.removeAll()
+            host.rootView = probe(index)
+            host.layoutSubtreeIfNeeded()
+            XCTAssertTrue(observed.contains { $0 == flow }, "Layout change \(index) must animate inside the hosting tree")
+        }
+    }
+
+    @MainActor func testOuterTransactionAloneDoesNotAnimateHostingRootReplacement() {
+        let original = PageStripLayoutSignature(pages: [[.app("a"), .app("b")]], draggingID: "app:a")
+        let changed = PageStripLayoutSignature(pages: [[.app("b"), .app("a")]], draggingID: "app:a")
+        var observed: [Animation?] = []
+        let host = NSHostingView(rootView: LayoutAnimationProbe(
+            signature: original, transaction: Transaction(), position: 0, bridgeEnabled: false,
+            record: { observed.append($0.animation) }
+        ))
+        host.frame = CGRect(x: 0, y: 0, width: 400, height: 100)
+        host.layoutSubtreeIfNeeded()
+        observed.removeAll()
+        withTransaction(Transaction(animation: .spring(response: 0.24, dampingFraction: 0.80))) {
+            host.rootView = LayoutAnimationProbe(signature: changed, transaction: Transaction(), position: 100,
+                                                 bridgeEnabled: false, record: { observed.append($0.animation) })
+        }
+        host.layoutSubtreeIfNeeded()
+        XCTAssertFalse(observed.isEmpty)
+        XCTAssertTrue(observed.allSatisfy { $0 == nil })
+    }
+
+    @MainActor func testUnchangedSignatureDoesNotAnimateUnrelatedUpdates() {
+        let signature = PageStripLayoutSignature(pages: [[.app("a"), .app("b")]], draggingID: nil)
+        let transaction = Transaction(animation: .spring(response: 0.24, dampingFraction: 0.80))
+        var observed: [Animation?] = []
+        let host = NSHostingView(rootView: LayoutAnimationProbe(
+            signature: signature, transaction: transaction, position: 0,
+            record: { observed.append($0.animation) }
+        ))
+        host.frame = CGRect(x: 0, y: 0, width: 400, height: 100)
+        host.layoutSubtreeIfNeeded()
+        observed.removeAll()
+        host.rootView = LayoutAnimationProbe(signature: signature, transaction: transaction, position: 100,
+                                             record: { observed.append($0.animation) })
+        host.layoutSubtreeIfNeeded()
+        XCTAssertFalse(observed.isEmpty)
+        XCTAssertTrue(observed.allSatisfy { $0 == nil })
+    }
+
+    @MainActor func testHostingLayoutChangesWithoutAnimationOrWithDisabledAnimationsStayImmediate() {
+        let original = PageStripLayoutSignature(pages: [[.app("a"), .app("b")]], draggingID: nil)
+        let changed = PageStripLayoutSignature(pages: [[.app("b")], [.app("a")]], draggingID: nil)
+        var disabled = Transaction(animation: .spring(response: 0.24, dampingFraction: 0.80))
+        disabled.disablesAnimations = true
+
+        for transaction in [Transaction(), disabled] {
+            var observed: [Animation?] = []
+            let host = NSHostingView(rootView: LayoutAnimationProbe(
+                signature: original, transaction: Transaction(), position: 0,
+                record: { observed.append($0.animation) }
+            ))
+            host.frame = CGRect(x: 0, y: 0, width: 400, height: 100)
+            host.layoutSubtreeIfNeeded()
+            observed.removeAll()
+            host.rootView = LayoutAnimationProbe(signature: changed, transaction: transaction, position: 100,
+                                                 record: { observed.append($0.animation) })
+            host.layoutSubtreeIfNeeded()
+            XCTAssertFalse(observed.isEmpty)
+            XCTAssertTrue(observed.allSatisfy { $0 == nil })
+        }
+    }
+
     func testWindowIncludesTwoNeighborPagesAndClipsAtEnds() {
         let entries = (0..<8).flatMap { page in
             (0..<2).map { index in
@@ -300,6 +430,26 @@ final class PageStripViewTests: XCTestCase {
         XCTAssertEqual(container.bounds.origin.x, 0)
         XCTAssertFalse(pager.isLocked)
         pager.detach(container)
+    }
+}
+
+private struct LayoutAnimationProbe: View {
+    let signature: PageStripLayoutSignature
+    let transaction: Transaction
+    let position: CGFloat
+    var bridgeEnabled = true
+    var record: (Transaction) -> Void
+
+    var body: some View {
+        let entry = Color.clear
+            .frame(width: 20, height: 20)
+            .position(x: position, y: 20)
+            .transaction { record($0) }
+        if bridgeEnabled {
+            entry.modifier(PageStripLayoutAnimation(signature: signature, transaction: transaction))
+        } else {
+            entry
+        }
     }
 }
 

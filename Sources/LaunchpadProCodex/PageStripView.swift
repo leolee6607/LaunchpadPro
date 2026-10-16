@@ -2,6 +2,27 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
+struct PageStripLayoutSignature: Equatable {
+    let entryIDs: [[String]]
+    let draggingID: String?
+
+    init(pages: [[LaunchEntry]], draggingID: String?) {
+        entryIDs = pages.map { $0.map(\.id) }
+        // Releasing a drag moves its anchored grid entry even if the preview order is unchanged.
+        self.draggingID = draggingID
+    }
+}
+
+struct PageStripLayoutAnimation: ViewModifier {
+    let signature: PageStripLayoutSignature
+    let transaction: Transaction
+
+    func body(content: Content) -> some View {
+        // rootView replacement does not carry the outer transaction into this hosting tree.
+        content.animation(transaction.disablesAnimations ? nil : transaction.animation, value: signature)
+    }
+}
+
 enum PageStripWindow {
     static func entries(
         from entries: [PlacedEntry],
@@ -84,6 +105,7 @@ struct PageStripRepresentable: NSViewRepresentable {
         let view = PageStripContainerView(frame: CGRect(origin: .zero, size: size))
         var root = content
         root.dimAnimated = !context.transaction.disablesAnimations
+        root.layoutTransaction = context.transaction
         view.install(content: root, size: stripSize)
         view.hitTestingEnabled = hitTestingEnabled
         view.excludedRects = excludedRects
@@ -97,6 +119,7 @@ struct PageStripRepresentable: NSViewRepresentable {
         view.excludedRects = excludedRects
         var root = content
         root.dimAnimated = !context.transaction.disablesAnimations
+        root.layoutTransaction = context.transaction
         withTransaction(context.transaction) {
             view.hostingView?.rootView = root
         }
@@ -115,6 +138,7 @@ struct PageStripContent: View {
     @ObservedObject var model: LaunchModel
     let entries: [PlacedEntry]
     let positions: [String: CGPoint]
+    let layoutSignature: PageStripLayoutSignature
     let size: CGSize
     let cell: CGSize
     let draggingID: String?
@@ -122,6 +146,7 @@ struct PageStripContent: View {
     let dragEnabled: Bool
     let folderProgress: CGFloat
     var dimAnimated = true
+    var layoutTransaction = Transaction()
     var onLaunch: (String) -> Void
     var onDismiss: () -> Void
     var onDragChanged: (LaunchEntry, CGPoint) -> Void
@@ -148,7 +173,14 @@ struct PageStripContent: View {
                 .frame(width: cell.width, height: cell.height)
                 .position(positions[placed.id] ?? .zero)
                 .zIndex(1)
+                .transaction {
+                    if placed.id == draggingID {
+                        $0.animation = nil
+                        $0.disablesAnimations = true
+                    }
+                }
             }
+            .modifier(PageStripLayoutAnimation(signature: layoutSignature, transaction: layoutTransaction))
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
         .coordinateSpace(name: "page-strip")

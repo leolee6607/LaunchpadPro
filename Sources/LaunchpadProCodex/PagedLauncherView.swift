@@ -116,6 +116,7 @@ struct PagedLauncherView: View {
                     model: model,
                     entries: entries,
                     positions: positions,
+                    layoutSignature: PageStripLayoutSignature(pages: activePages, draggingID: draggingID),
                     size: CGSize(width: CGFloat(navigablePageCount) * size.width, height: size.height),
                     cell: CGSize(width: cellWidth, height: cellHeight),
                     draggingID: draggingID,
@@ -140,6 +141,10 @@ struct PagedLauncherView: View {
                 floatingEntryView(dragged)
                     .frame(width: cellWidth, height: cellHeight)
                     .position(dragPoint)
+                    .transaction {
+                        $0.animation = nil
+                        $0.disablesAnimations = true
+                    }
                     .zIndex(100)
                     .allowsHitTesting(false)
                     .blur(radius: 18 * folderProgress)
