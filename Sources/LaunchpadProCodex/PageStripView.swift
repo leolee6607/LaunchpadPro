@@ -2,6 +2,22 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
+enum PageStripWindow {
+    static func entries(
+        from entries: [PlacedEntry],
+        activeLocations: [String: (page: Int, index: Int)],
+        restingPage: Int,
+        draggingID: String?
+    ) -> [PlacedEntry] {
+        let pages = (restingPage - 2)...(restingPage + 2)
+        return entries.filter { placed in
+            if placed.id == draggingID || pages.contains(placed.page) { return true }
+            guard let active = activeLocations[placed.id] else { return false }
+            return pages.contains(active.page)
+        }
+    }
+}
+
 @MainActor
 final class PageStripContainerView: NSView {
     var hitTestingEnabled = true
@@ -127,6 +143,7 @@ struct PageStripContent: View {
                     isFolderTarget: placed.id == folderTargetID,
                     onLaunch: onLaunch
                 )
+                .equatable()
                 .highPriorityGesture(dragGesture(placed.entry), including: dragEnabled ? .all : .none)
                 .frame(width: cell.width, height: cell.height)
                 .position(positions[placed.id] ?? .zero)

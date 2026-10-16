@@ -515,7 +515,7 @@ private struct VerticalLauncherGrid: View {
     }
 }
 
-struct LauncherEntryView: View {
+struct LauncherEntryView: View, Equatable {
     @ObservedObject var model: LaunchModel
 
     let entry: LaunchEntry
@@ -523,6 +523,11 @@ struct LauncherEntryView: View {
     var isDragging: Bool
     var isFolderTarget: Bool
     var onLaunch: (String) -> Void
+
+    static func == (lhs: LauncherEntryView, rhs: LauncherEntryView) -> Bool {
+        lhs.entry == rhs.entry && lhs.cell == rhs.cell
+            && lhs.isDragging == rhs.isDragging && lhs.isFolderTarget == rhs.isFolderTarget
+    }
 
     var body: some View {
         Group {

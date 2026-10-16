@@ -143,7 +143,16 @@ final class PagerController {
 
     private func publishState() {
         if state.targetPage != machine.targetPage { state.targetPage = machine.targetPage }
-        if state.restingPage != machine.restingPage { state.restingPage = machine.restingPage }
+        let restingPage: Int
+        if machine.phase == .idle {
+            restingPage = machine.restingPage
+        } else if abs(machine.targetPage - state.restingPage) >= 2 {
+            restingPage = machine.targetPage
+        } else {
+            // Keep an early window shift until settlement, even across interrupted snaps.
+            restingPage = min(state.restingPage, machine.pageCount - 1)
+        }
+        if state.restingPage != restingPage { state.restingPage = restingPage }
     }
 
     private func finishMeasurementsIfIdle(time: TimeInterval) {

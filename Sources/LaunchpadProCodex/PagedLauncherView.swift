@@ -92,7 +92,12 @@ struct PagedLauncherView: View {
     var body: some View {
         let _ = FrameMeter.noteBody(.paged)
         let indexMap = indexMap(for: activePages)
-        let entries = placedEntries
+        let entries = PageStripWindow.entries(
+            from: placedEntries,
+            activeLocations: indexMap,
+            restingPage: pager.state.restingPage,
+            draggingID: draggingID
+        )
         let positions = Dictionary(uniqueKeysWithValues: entries.map {
             ($0.id, position(for: $0, selectedPage: 0, indexMap: indexMap))
         })

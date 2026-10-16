@@ -5,6 +5,130 @@ import XCTest
 @testable import LaunchpadProCodex
 
 final class PageStripViewTests: XCTestCase {
+    func testWindowIncludesTwoNeighborPagesAndClipsAtEnds() {
+        let entries = (0..<8).flatMap { page in
+            (0..<2).map { index in
+                PlacedEntry(page: page, index: index, entry: .app("\(page)-\(index)"))
+            }
+        }
+        for (restingPage, expectedPages) in [(0, [0, 1, 2]), (3, [1, 2, 3, 4, 5]), (7, [5, 6, 7])] {
+            let visible = PageStripWindow.entries(from: entries, activeLocations: [:],
+                                                  restingPage: restingPage, draggingID: nil)
+            XCTAssertEqual(visible.map(\.id), expectedPages.flatMap { page in
+                ["app:\(page)-0", "app:\(page)-1"]
+            })
+        }
+        XCTAssertTrue(PageStripWindow.entries(from: [], activeLocations: [:],
+                                               restingPage: 0, draggingID: nil).isEmpty)
+    }
+
+    func testWindowIncludesOriginalAndPreviewLocationsWithoutMovingEntries() {
+        let entries = [
+            PlacedEntry(page: 0, index: 1, entry: .app("moved-out")),
+            PlacedEntry(page: 5, index: 2, entry: .app("moved-in")),
+            PlacedEntry(page: 6, index: 0, entry: .app("outside"))
+        ]
+        let active: [String: (page: Int, index: Int)] = [
+            "app:moved-out": (5, 0), "app:moved-in": (2, 0), "app:outside": (7, 0)
+        ]
+        let visible = PageStripWindow.entries(from: entries, activeLocations: active,
+                                              restingPage: 0, draggingID: nil)
+        XCTAssertEqual(visible.map(\.id), ["app:moved-out", "app:moved-in"])
+        XCTAssertEqual(visible.map(\.page), [0, 5])
+        XCTAssertEqual(visible.map(\.index), [1, 2])
+    }
+
+    func testDraggedEntrySurvivesWindowChangesEvenOutsidePreviewWindow() {
+        let entries = (0..<10).map { PlacedEntry(page: $0, index: 0, entry: .app("\($0)")) }
+        let active: [String: (page: Int, index: Int)] = ["app:0": (1, 0)]
+        for restingPage in [0, 3, 6, 9] {
+            let visible = PageStripWindow.entries(from: entries, activeLocations: active,
+                                                  restingPage: restingPage, draggingID: "app:0")
+            XCTAssertEqual(visible.filter { $0.id == "app:0" }.count, 1)
+            XCTAssertEqual(visible.first?.page, 0)
+        }
+        let released = PageStripWindow.entries(from: entries, activeLocations: active,
+                                               restingPage: 9, draggingID: nil)
+        XCTAssertEqual(released.map(\.id), ["app:7", "app:8", "app:9"])
+        XCTAssertTrue(PageStripWindow.entries(from: [], activeLocations: active,
+                                               restingPage: 0, draggingID: "app:0").isEmpty)
+    }
+
+    @MainActor func testConsecutiveSwipesAdvanceWindowOnceAndKeepItUntilSettlement() {
+        for direction in [-1, 1] {
+            let start = direction == 1 ? 0 : 5
+            let pager = PagerController()
+            let container = PageStripContainerView(frame: CGRect(x: 0, y: 0, width: 1500, height: 800))
+            pager.attach(container)
+            defer { pager.detach(container) }
+            pager.configure(pageWidth: 1500, pageCount: 6)
+            pager.jump(to: start)
+            pager.handleScroll(dx: 0, dy: 0, phase: .began, time: 10)
+            pager.handleScroll(dx: CGFloat(-direction * 400), dy: 0, phase: .ended, time: 10.1)
+            XCTAssertEqual(pager.state.targetPage, start + direction)
+            XCTAssertEqual(pager.state.restingPage, start)
+            pager.advanceFrame(timestamp: 10.27, targetTimestamp: 10.28, now: 10.27)
+            pager.handleScroll(dx: 0, dy: 0, phase: .began, time: 10.28)
+            let beforeSecondRelease = container.bounds.origin.x
+            pager.handleScroll(dx: CGFloat(-direction * 500), dy: 0, phase: .ended, time: 10.38)
+            XCTAssertEqual(pager.state.targetPage, start + direction * 2)
+            XCTAssertEqual(pager.state.restingPage, start + direction * 2)
+            XCTAssertEqual(container.bounds.origin.x, beforeSecondRelease + CGFloat(direction * 500), accuracy: 1e-6)
+
+            let changes = ObservationCount()
+            withObservationTracking {
+                _ = pager.state.restingPage
+            } onChange: {
+                changes.value += 1
+            }
+            for frame in 1...5 {
+                let timestamp = 10.38 + Double(frame) / 120
+                pager.advanceFrame(timestamp: timestamp, targetTimestamp: timestamp + 1 / 120, now: timestamp)
+            }
+            pager.handleScroll(dx: 0, dy: 0, phase: .mayBegin, time: 10.44)
+            pager.handleScroll(dx: 0, dy: 0, phase: .began, time: 10.45)
+            pager.handleScroll(dx: CGFloat(-direction * 10), dy: 0, phase: .changed, time: 10.46)
+            pager.handleScroll(dx: 0, dy: 0, phase: .cancelled, time: 10.47)
+            pager.advanceFrame(timestamp: 11.49, targetTimestamp: 11.5, now: 11.49)
+            XCTAssertEqual(pager.state.restingPage, start + direction * 2)
+            XCTAssertEqual(container.bounds.origin.x, CGFloat(start + direction * 2) * 1500)
+            XCTAssertEqual(changes.value, 0)
+
+            pager.handleScroll(dx: 0, dy: 0, phase: .began, time: 12)
+            pager.handleScroll(dx: CGFloat(direction * 400), dy: 0, phase: .ended, time: 12.1)
+            XCTAssertEqual(pager.state.targetPage, start + direction)
+            XCTAssertEqual(pager.state.restingPage, start + direction * 2)
+            pager.advanceFrame(timestamp: 13.09, targetTimestamp: 13.1, now: 13.09)
+            XCTAssertEqual(pager.state.restingPage, start + direction)
+            XCTAssertEqual(changes.value, 1)
+        }
+    }
+
+    @MainActor func testEarlyWindowShiftHandlesCommandsAndPageCountReduction() {
+        let pager = PagerController()
+        let container = PageStripContainerView(frame: CGRect(x: 0, y: 0, width: 1500, height: 800))
+        pager.attach(container)
+        defer { pager.detach(container) }
+        pager.configure(pageWidth: 1500, pageCount: 6)
+        pager.snap(to: 5, velocity: 0)
+        XCTAssertEqual(pager.state.restingPage, 5)
+        XCTAssertEqual(container.bounds.origin.x, 0)
+        let time = CACurrentMediaTime()
+        pager.advanceFrame(timestamp: time + 0.09, targetTimestamp: time + 0.1, now: time + 0.09)
+        XCTAssertEqual(pager.state.restingPage, 5)
+        pager.configure(pageWidth: 1500, pageCount: 5)
+        XCTAssertEqual(pager.state.targetPage, 4)
+        XCTAssertEqual(pager.state.restingPage, 4)
+        pager.configure(pageWidth: 1500, pageCount: 2)
+        XCTAssertEqual(pager.state.targetPage, 1)
+        XCTAssertEqual(pager.state.restingPage, 1)
+        pager.stop()
+        XCTAssertEqual(container.bounds.origin.x, 1500)
+        pager.reset()
+        XCTAssertEqual(pager.state.restingPage, 0)
+        XCTAssertEqual(container.bounds.origin.x, 0)
+    }
+
     @MainActor func testSecondPageHitUsesShiftedBoundsAndParentCoordinates() {
         let parent = FlippedTestView(frame: CGRect(x: 0, y: 0, width: 1800, height: 1000))
         let container = PageStripContainerView(frame: CGRect(x: 40, y: 30, width: 1500, height: 800))
