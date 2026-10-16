@@ -1,5 +1,4 @@
 import Foundation
-import QuartzCore
 import os
 
 /// Value-only measurements, also usable with synthetic clocks in tests.

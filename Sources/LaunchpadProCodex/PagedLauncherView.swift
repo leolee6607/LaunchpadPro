@@ -11,7 +11,6 @@ struct PlacedEntry: Identifiable {
 private struct FolderPanelMetrics {
     let cell: CGSize
     let columns: Int
-    let rows: Int
     let horizontalSpacing: CGFloat
     let verticalSpacing: CGFloat
     let panelWidth: CGFloat
@@ -99,7 +98,7 @@ struct PagedLauncherView: View {
             draggingID: draggingID
         )
         let positions = Dictionary(uniqueKeysWithValues: entries.map {
-            ($0.id, position(for: $0, selectedPage: 0, indexMap: indexMap))
+            ($0.id, position(for: $0, indexMap: indexMap))
         })
         let folderProgress = effectiveFolderReveal
 
@@ -405,18 +404,17 @@ struct PagedLauncherView: View {
 
     private func position(
         for placed: PlacedEntry,
-        selectedPage: Int,
         indexMap: [String: (page: Int, index: Int)]
     ) -> CGPoint {
         if placed.entry.id == draggingID {
-            return center(page: placed.page, index: placed.index, selectedPage: selectedPage)
+            return center(page: placed.page, index: placed.index, selectedPage: 0)
         }
 
         if let located = indexMap[placed.entry.id] {
-            return center(page: located.page, index: located.index, selectedPage: selectedPage)
+            return center(page: located.page, index: located.index, selectedPage: 0)
         }
 
-        return center(page: placed.page, index: placed.index, selectedPage: selectedPage)
+        return center(page: placed.page, index: placed.index, selectedPage: 0)
     }
 
     private func indexMap(for layout: [[LaunchEntry]]) -> [String: (page: Int, index: Int)] {
@@ -549,28 +547,6 @@ struct PagedLauncherView: View {
         target.index = min(max(target.index, 0), result[target.page].count)
         result[target.page].insert(source, at: target.index)
         cascadeOverflow(&result)
-        return result
-    }
-
-    private func mergedPages(draggingID: String, targetID: String) -> [[LaunchEntry]]? {
-        var result = pages
-        guard let dragged = removeEntry(draggingID, from: &result),
-              case .app(let draggedAppID) = dragged,
-              let target = locate(targetID, in: result) else { return nil }
-
-        let targetEntry = result[target.page][target.index]
-        switch targetEntry {
-        case .app(let targetAppID):
-            result[target.page][target.index] = .folder(
-                FolderRecord(name: "未命名", appIDs: [targetAppID, draggedAppID])
-            )
-        case .folder(var folder):
-            if !folder.appIDs.contains(draggedAppID) {
-                folder.appIDs.append(draggedAppID)
-            }
-            result[target.page][target.index] = .folder(folder)
-        }
-
         return result
     }
 
@@ -763,7 +739,6 @@ struct PagedLauncherView: View {
         return FolderPanelMetrics(
             cell: cell,
             columns: columns,
-            rows: rows,
             horizontalSpacing: horizontalSpacing,
             verticalSpacing: verticalSpacing,
             panelWidth: panelWidth,
