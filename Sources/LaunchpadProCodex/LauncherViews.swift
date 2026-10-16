@@ -16,6 +16,7 @@ struct LauncherRootView: View {
     @ObservedObject var settings = AppSettings.shared
     @ObservedObject private var bus = LauncherBus.shared
 
+    let pager: PagerController
     var onDismiss: () -> Void
     var onOpenSettings: () -> Void
     var onRescan: () -> Void
@@ -39,6 +40,7 @@ struct LauncherRootView: View {
 
             LauncherBody(
                 model: model,
+                pager: pager,
                 topInset: topInset + 54,
                 onLaunch: { id in
                     model.launch(id)
@@ -91,6 +93,7 @@ private struct LauncherBody: View {
     @ObservedObject var model: LaunchModel
     @ObservedObject var settings = AppSettings.shared
 
+    let pager: PagerController
     let topInset: CGFloat
     var onLaunch: (String) -> Void
     var onDismiss: () -> Void
@@ -112,6 +115,7 @@ private struct LauncherBody: View {
             } else {
                 PagedLauncherView(
                     model: model,
+                    pager: pager,
                     size: geometry.size,
                     topInset: topInset,
                     onLaunch: onLaunch,

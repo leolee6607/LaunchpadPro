@@ -14,10 +14,7 @@ final class OverlayController {
     private var localMonitor: Any?
     private var wheelAccumulation: CGFloat = 0
     private var lastWheelPageFlip = Date.distantPast
-    private var horizontalSwipe = false
-    private var dampedScrollDX: CGFloat = 0
-    private var swipeEnergy: CGFloat = 0
-    private var displayLink: CADisplayLink?
+    private let pager = PagerController()
 
     var onOpenSettings: () -> Void = {}
     var onRescan: () -> Void = {}
@@ -41,6 +38,7 @@ final class OverlayController {
         model.openFolderID = nil
         LauncherBus.shared.targetScreenTopSafeArea = screen.safeAreaInsets.top
         LauncherBus.shared.reset()
+        pager.reset()
 
         let panel = panel ?? makePanel(screen: screen)
         self.panel = panel
@@ -62,7 +60,7 @@ final class OverlayController {
     func hide() {
         guard let panel else { return }
         removeLocalMonitor()
-        stopDisplayLink()
+        pager.stop()
 
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.12
@@ -97,6 +95,7 @@ final class OverlayController {
 
         let root = LauncherRootView(
             model: model,
+            pager: pager,
             onDismiss: { [weak self] in self?.hide() },
             onOpenSettings: { [weak self] in
                 self?.hide()
@@ -179,56 +178,10 @@ final class OverlayController {
     private func handleScroll(_ event: NSEvent) {
         guard model.openFolderID == nil, !model.settings.verticalScroll else { return }
 
-        let handlerStart = FrameMeter.enabled ? CACurrentMediaTime() : 0
-        var appliedDX: CGFloat = 0
-        var measuredVelocity: CGFloat = 0
         let dx = event.scrollingDeltaX
         let dy = event.scrollingDeltaY
-        let hasGesturePhase = !event.phase.isEmpty || !event.momentumPhase.isEmpty
-
-        if hasGesturePhase {
-            if event.phase.contains(.began) {
-                FrameMeter.begin(time: event.timestamp, mode: "legacy")
-            }
-            defer {
-                if FrameMeter.enabled {
-                    FrameMeter.noteEvent(time: event.timestamp, raw: dx, applied: appliedDX,
-                                         handler: CACurrentMediaTime() - handlerStart)
-                    if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
-                        FrameMeter.finish(time: event.timestamp, velocity: measuredVelocity)
-                    }
-                }
-            }
-            if event.phase.contains(.began) {
-                horizontalSwipe = false
-                dampedScrollDX = 0
-                swipeEnergy = 0
-            }
-            if event.phase.contains(.changed) {
-                if !horizontalSwipe && abs(dx) > abs(dy) {
-                    horizontalSwipe = true
-                    dampedScrollDX = 0
-                    swipeEnergy = 0
-                    startDisplayLink()
-                }
-                if horizontalSwipe {
-                    if let dampedDX = dampedHorizontalDelta(dx) {
-                        swipeEnergy += dampedDX
-                        appliedDX = dampedDX * 1.14
-                        LauncherBus.shared.liveScroll(dx: dampedDX)
-                    }
-                }
-            }
-            if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
-                measuredVelocity = dampedScrollDX
-                if horizontalSwipe {
-                    LauncherBus.shared.endScroll(velocity: dampedScrollDX, energy: swipeEnergy)
-                }
-                horizontalSwipe = false
-                dampedScrollDX = 0
-                swipeEnergy = 0
-                stopDisplayLink()
-            }
+        if !event.phase.isEmpty || !event.momentumPhase.isEmpty {
+            pager.handleScroll(event)
             return
         }
 
@@ -241,55 +194,13 @@ final class OverlayController {
         guard Date().timeIntervalSince(lastWheelPageFlip) > 0.3 else { return }
 
         if wheelAccumulation <= -40 {
-            LauncherBus.shared.nextPage()
+            pager.step(by: 1)
             wheelAccumulation = 0
             lastWheelPageFlip = Date()
         } else if wheelAccumulation >= 40 {
-            LauncherBus.shared.previousPage()
+            pager.step(by: -1)
             wheelAccumulation = 0
             lastWheelPageFlip = Date()
         }
-    }
-
-    private func dampedHorizontalDelta(_ dx: CGFloat) -> CGFloat? {
-        let magnitude = abs(dx)
-        guard magnitude >= 0.035 else { return nil }
-
-        if dampedScrollDX != 0 && (dx > 0) != (dampedScrollDX > 0) {
-            // Direction changes are usually intentional page resistance or a new gesture;
-            // reset history so the filter does not pull against the finger.
-            dampedScrollDX = 0
-        }
-
-        // Adaptive damping: slow micro-motion gets filtered, fast swipes stay responsive.
-        let alpha = min(0.86, max(0.24, 0.22 + magnitude / 10.0))
-        dampedScrollDX += (dx - dampedScrollDX) * alpha
-
-        let directMix = min(0.45, max(0, (magnitude - 2.4) / 11.0))
-        let output = dampedScrollDX * (1 - directMix) + dx * directMix
-
-        return abs(output) >= 0.04 ? output : nil
-    }
-
-    private func startDisplayLink() {
-        guard displayLink == nil, let panel else { return }
-        // On macOS, CADisplayLink is created from NSWindow/NSView/NSScreen displayLink APIs.
-        let link = panel.displayLink(target: self, selector: #selector(displayLinkFired(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 120, maximum: 120, preferred: 120)
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-    }
-
-    private func stopDisplayLink() {
-        displayLink?.invalidate()
-        displayLink = nil
-    }
-
-    @objc private func displayLinkFired(_ link: CADisplayLink) {
-        if FrameMeter.enabled {
-            FrameMeter.noteTick(timestamp: link.timestamp, target: link.targetTimestamp, now: CACurrentMediaTime())
-        }
-        let duration = link.targetTimestamp - link.timestamp
-        LauncherBus.shared.displayFrame(duration: duration)
     }
 }

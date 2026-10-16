@@ -72,12 +72,11 @@ enum FrameMeter {
     private static let logger = Logger(subsystem: "com.leo.launchpadprocodex", category: "framemeter")
     private(set) static var stats: FrameStats?
     private static var sequence = 0
-    private static var mode = "legacy"
+    private static var mode = "direct"
     private static var started = 0.0
     private static var released: Double?
     private static var startPage = 0
     private static var lastPage = 0
-    private static var position = 0.0
     private static var showMilliseconds = 0.0
 
     static func begin(time: Double, mode: String, page: Int? = nil) {
@@ -96,21 +95,15 @@ enum FrameMeter {
         stats?.bodies[body.rawValue] += 1
     }
 
-    static func noteLegacyPosition(page: Int, offset: CGFloat, width: CGFloat) {
-        guard enabled else { return }
-        lastPage = page
-        position = Double(CGFloat(page) * width - offset)
-    }
-
     static func noteEvent(time: Double, raw: CGFloat, applied: CGFloat, handler: Double) {
         guard enabled else { return }
         stats?.event(time: time, raw: Double(raw), applied: Double(applied), handler: handler)
     }
 
-    static func noteTick(timestamp: Double, target: Double, now: Double, stripX: CGFloat? = nil) {
+    static func noteTick(timestamp: Double, target: Double, now: Double, stripX: CGFloat = 0) {
         guard enabled else { return }
         stats?.tick(timestamp: timestamp, target: target, now: now,
-                    position: stripX.map(Double.init) ?? position, tracking: released == nil)
+                    position: Double(stripX), tracking: released == nil)
     }
 
     static func endTracking(time: Double) {
@@ -125,6 +118,7 @@ enum FrameMeter {
 
     static func finish(time: Double, page: Int? = nil, velocity: CGFloat) {
         guard enabled, let stats else { return }
+        lastPage = page ?? lastPage
         let end = released ?? time
         func p(_ values: [Double], _ fraction: Double, _ scale: Double = 1) -> Double {
             FrameStats.percentile(values, fraction) * scale
