@@ -40,16 +40,34 @@ struct PageStripEntryPlacement: ViewModifier {
     var isDragging = false
     var animationsDisabled = false
 
+    // Transactions from the outer graph do not reliably cross the NSHostingView
+    // boundary (drag updates arrive from a gesture inside this host), so the
+    // reflow spring is started here, as a state change owned by the hosted graph.
+    @State private var shown: CGPoint?
+    @State private var lastToken: UInt64?
+
     func body(content: Content) -> some View {
         content
             // Keep the gesture owner mounted, but hide its icon AND label immediately.
             .opacity(isDragging ? 0 : 1)
             .transaction { $0.animation = nil }
-            .position(position)
-            .modifier(PageStripReorderAnimation(
-                reorderToken: reorderToken, animationsDisabled: animationsDisabled || isDragging
-            ))
+            .position(shown ?? position)
             .transition(.identity)
+            .onAppear {
+                shown = position
+                lastToken = reorderToken
+            }
+            .onChange(of: position) { _, newPosition in
+                let reordered = lastToken != reorderToken
+                lastToken = reorderToken
+                if reordered && !animationsDisabled && !isDragging {
+                    withAnimation(PageStripReorderAnimation.flow) { shown = newPosition }
+                } else {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { shown = newPosition }
+                }
+            }
     }
 }
 
