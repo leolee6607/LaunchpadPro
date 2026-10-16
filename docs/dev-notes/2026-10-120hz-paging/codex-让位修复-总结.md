@@ -1,0 +1,3 @@
+- 已修复。根因是 `NSHostingView` 边界丢失外层动画事务。内层按布局签名恢复原版 flow，拖拽位置禁用动画。
+- 修改了 [PageStripView.swift](/Users/leo/本地/Project_Git/重要/LaunchpadPro-hybrid/Sources/LaunchpadProCodex/PageStripView.swift)、[PagedLauncherView.swift](/Users/leo/本地/Project_Git/重要/LaunchpadPro-hybrid/Sources/LaunchpadProCodex/PagedLauncherView.swift) 和对应测试。Release 构建、60 项测试通过，红线检查通过，未提交。
+- [施工记录](/Users/leo/本地/Project_Git/重要/LaunchpadPro-实验/施工记录-codex.md) 已追加并在 Finder 定位。仍需 Leo 实测让位、落位、合并重排、拖拽跟手，以及首次显示／页数／搜索切换和翻页 FrameMeter `0/0/0`。
