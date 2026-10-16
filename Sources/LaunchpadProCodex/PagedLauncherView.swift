@@ -8,6 +8,48 @@ struct PlacedEntry: Identifiable {
     var id: String { entry.id }
 }
 
+enum PageStripReordering {
+    struct Location: Equatable {
+        let page: Int
+        let index: Int
+    }
+
+    static func locations(in pages: [[LaunchEntry]]) -> [String: Location] {
+        var result: [String: Location] = [:]
+        for (page, entries) in pages.enumerated() {
+            for (index, entry) in entries.enumerated() {
+                result[entry.id] = Location(page: page, index: index)
+            }
+        }
+        return result
+    }
+
+    static func preview(
+        pages: [[LaunchEntry]], draggingID: String, target: (page: Int, index: Int), perPage: Int
+    ) -> [[LaunchEntry]] {
+        var result = pages
+        guard let source = locations(in: pages)[draggingID] else { return result }
+        let entry = result[source.page].remove(at: source.index)
+        while target.page >= result.count { result.append([]) }
+        let index = min(max(target.index, 0), result[target.page].count)
+        result[target.page].insert(entry, at: index)
+        cascadeOverflow(&result, perPage: perPage)
+        return result
+    }
+
+    static func cascadeOverflow(_ layout: inout [[LaunchEntry]], perPage: Int) {
+        var page = 0
+        while page < layout.count {
+            while layout[page].count > perPage {
+                let overflow = layout[page].removeLast()
+                if page + 1 >= layout.count { layout.append([]) }
+                layout[page + 1].insert(overflow, at: 0)
+            }
+            page += 1
+        }
+    }
+}
+
 private struct FolderPanelMetrics {
     let cell: CGSize
     let columns: Int
@@ -35,6 +77,7 @@ struct PagedLauncherView: View {
 
     @State private var pages: [[LaunchEntry]] = []
     @State private var previewPages: [[LaunchEntry]]?
+    @State private var reorder = PageStripReorder()
     @State private var draggingID: String?
     @State private var dragPoint: CGPoint = .zero
     @State private var folderTargetID: String?
@@ -116,7 +159,7 @@ struct PagedLauncherView: View {
                     model: model,
                     entries: entries,
                     positions: positions,
-                    layoutSignature: PageStripLayoutSignature(pages: activePages, draggingID: draggingID),
+                    reorder: reorder,
                     size: CGSize(width: CGFloat(navigablePageCount) * size.width, height: size.height),
                     cell: CGSize(width: cellWidth, height: cellHeight),
                     draggingID: draggingID,
@@ -261,7 +304,9 @@ struct PagedLauncherView: View {
         lastPreviewKey = key
 
         withAnimation(flow) {
-            previewPages = reorderedPreview(draggingID: draggingID, target: target)
+            let preview = reorderedPreview(draggingID: draggingID, target: target)
+            reorder.record(from: activePages, to: preview)
+            previewPages = preview
         }
     }
 
@@ -274,7 +319,9 @@ struct PagedLauncherView: View {
         let dropTargetID = folderTargetID ?? mergeTarget(at: point, excluding: draggingID)?.id
         if let dropTargetID, commitMergeToModel(draggingID: draggingID, targetID: dropTargetID) {
             withAnimation(flow) {
-                pages = buildPages()
+                let merged = buildPages()
+                reorder.record(from: activePages, to: merged)
+                pages = merged
                 previewPages = nil
                 self.draggingID = nil
                 self.folderTargetID = nil
@@ -286,6 +333,7 @@ struct PagedLauncherView: View {
         let target = reorderSlot(for: point, draggingID: draggingID)
         let committed = clean(previewPages ?? reorderedPreview(draggingID: draggingID, target: target))
         withAnimation(flow) {
+            reorder.record(from: activePages, to: committed, releasedID: draggingID)
             pages = committed
             previewPages = nil
             self.draggingID = nil
@@ -544,15 +592,7 @@ struct PagedLauncherView: View {
     }
 
     private func reorderedPreview(draggingID: String, target: (page: Int, index: Int)) -> [[LaunchEntry]] {
-        var result = pages
-        guard let source = removeEntry(draggingID, from: &result) else { return result }
-
-        var target = target
-        while target.page >= result.count { result.append([]) }
-        target.index = min(max(target.index, 0), result[target.page].count)
-        result[target.page].insert(source, at: target.index)
-        cascadeOverflow(&result)
-        return result
+        PageStripReordering.preview(pages: pages, draggingID: draggingID, target: target, perPage: perPage)
     }
 
     private func removeEntry(_ id: String, from pages: inout [[LaunchEntry]]) -> LaunchEntry? {
@@ -579,15 +619,7 @@ struct PagedLauncherView: View {
     }
 
     private func cascadeOverflow(_ layout: inout [[LaunchEntry]]) {
-        var page = 0
-        while page < layout.count {
-            while layout[page].count > perPage {
-                let overflow = layout[page].removeLast()
-                if page + 1 >= layout.count { layout.append([]) }
-                layout[page + 1].insert(overflow, at: 0)
-            }
-            page += 1
-        }
+        PageStripReordering.cascadeOverflow(&layout, perPage: perPage)
     }
 
     private func clean(_ layout: [[LaunchEntry]]) -> [[LaunchEntry]] {
@@ -947,7 +979,9 @@ struct PagedLauncherView: View {
         cascadeOverflow(&layout)
 
         withAnimation(flow) {
-            previewPages = clean(layout)
+            let preview = clean(layout)
+            reorder.record(from: activePages, to: preview)
+            previewPages = preview
         }
     }
 

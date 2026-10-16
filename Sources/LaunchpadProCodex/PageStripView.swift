@@ -2,24 +2,54 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
-struct PageStripLayoutSignature: Equatable {
-    let entryIDs: [[String]]
-    let draggingID: String?
+struct PageStripReorder {
+    private var generation: UInt64 = 0
+    private var tokens: [String: UInt64] = [:]
 
-    init(pages: [[LaunchEntry]], draggingID: String?) {
-        entryIDs = pages.map { $0.map(\.id) }
-        // Releasing a drag moves its anchored grid entry even if the preview order is unchanged.
-        self.draggingID = draggingID
+    func token(for id: String) -> UInt64 { tokens[id, default: 0] }
+
+    // Called only by drag preview/commit/merge, never by paging or view evaluation.
+    mutating func record(from old: [[LaunchEntry]], to new: [[LaunchEntry]], releasedID: String? = nil) {
+        let before = PageStripReordering.locations(in: old)
+        let after = PageStripReordering.locations(in: new)
+        generation &+= 1
+        for (id, location) in after {
+            if let previous = before[id], previous != location || id == releasedID {
+                tokens[id] = generation
+            }
+        }
     }
 }
 
-struct PageStripLayoutAnimation: ViewModifier {
-    let signature: PageStripLayoutSignature
-    let transaction: Transaction
+struct PageStripReorderAnimation: ViewModifier {
+    static let flow = Animation.spring(response: 0.24, dampingFraction: 0.80)
+    let reorderToken: UInt64
+    var animationsDisabled = false
 
     func body(content: Content) -> some View {
-        // rootView replacement does not carry the outer transaction into this hosting tree.
-        content.animation(transaction.disablesAnimations ? nil : transaction.animation, value: signature)
+        content
+            .animation(animationsDisabled ? nil : Self.flow, value: reorderToken)
+            // Page-window changes and folder transactions cannot animate grid positions.
+            .transaction { $0.animation = nil }
+    }
+}
+
+struct PageStripEntryPlacement: ViewModifier {
+    let position: CGPoint
+    let reorderToken: UInt64
+    var isDragging = false
+    var animationsDisabled = false
+
+    func body(content: Content) -> some View {
+        content
+            // Keep the gesture owner mounted, but hide its icon AND label immediately.
+            .opacity(isDragging ? 0 : 1)
+            .transaction { $0.animation = nil }
+            .position(position)
+            .modifier(PageStripReorderAnimation(
+                reorderToken: reorderToken, animationsDisabled: animationsDisabled || isDragging
+            ))
+            .transition(.identity)
     }
 }
 
@@ -105,7 +135,7 @@ struct PageStripRepresentable: NSViewRepresentable {
         let view = PageStripContainerView(frame: CGRect(origin: .zero, size: size))
         var root = content
         root.dimAnimated = !context.transaction.disablesAnimations
-        root.layoutTransaction = context.transaction
+        root.reorderAnimationsDisabled = context.transaction.disablesAnimations
         view.install(content: root, size: stripSize)
         view.hitTestingEnabled = hitTestingEnabled
         view.excludedRects = excludedRects
@@ -119,7 +149,7 @@ struct PageStripRepresentable: NSViewRepresentable {
         view.excludedRects = excludedRects
         var root = content
         root.dimAnimated = !context.transaction.disablesAnimations
-        root.layoutTransaction = context.transaction
+        root.reorderAnimationsDisabled = context.transaction.disablesAnimations
         withTransaction(context.transaction) {
             view.hostingView?.rootView = root
         }
@@ -138,7 +168,7 @@ struct PageStripContent: View {
     @ObservedObject var model: LaunchModel
     let entries: [PlacedEntry]
     let positions: [String: CGPoint]
-    let layoutSignature: PageStripLayoutSignature
+    let reorder: PageStripReorder
     let size: CGSize
     let cell: CGSize
     let draggingID: String?
@@ -146,7 +176,7 @@ struct PageStripContent: View {
     let dragEnabled: Bool
     let folderProgress: CGFloat
     var dimAnimated = true
-    var layoutTransaction = Transaction()
+    var reorderAnimationsDisabled = false
     var onLaunch: (String) -> Void
     var onDismiss: () -> Void
     var onDragChanged: (LaunchEntry, CGPoint) -> Void
@@ -171,16 +201,14 @@ struct PageStripContent: View {
                 .equatable()
                 .highPriorityGesture(dragGesture(placed.entry), including: dragEnabled ? .all : .none)
                 .frame(width: cell.width, height: cell.height)
-                .position(positions[placed.id] ?? .zero)
+                .modifier(PageStripEntryPlacement(
+                    position: positions[placed.id] ?? .zero,
+                    reorderToken: reorder.token(for: placed.id),
+                    isDragging: placed.id == draggingID,
+                    animationsDisabled: reorderAnimationsDisabled
+                ))
                 .zIndex(1)
-                .transaction {
-                    if placed.id == draggingID {
-                        $0.animation = nil
-                        $0.disablesAnimations = true
-                    }
-                }
             }
-            .modifier(PageStripLayoutAnimation(signature: layoutSignature, transaction: layoutTransaction))
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
         .coordinateSpace(name: "page-strip")
