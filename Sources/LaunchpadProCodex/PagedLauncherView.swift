@@ -103,6 +103,8 @@ struct PagedLauncherView: View {
     }
 
     var body: some View {
+        let _ = FrameMeter.noteBody(.paged)
+        let _ = FrameMeter.noteLegacyPosition(page: clampedPage, offset: swipeOffset, width: size.width)
         let page = clampedPage
         let indexMap = indexMap(for: activePages)
         let folderProgress = effectiveFolderReveal

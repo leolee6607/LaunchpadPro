@@ -179,11 +179,26 @@ final class OverlayController {
     private func handleScroll(_ event: NSEvent) {
         guard model.openFolderID == nil, !model.settings.verticalScroll else { return }
 
+        let handlerStart = FrameMeter.enabled ? CACurrentMediaTime() : 0
+        var appliedDX: CGFloat = 0
+        var measuredVelocity: CGFloat = 0
         let dx = event.scrollingDeltaX
         let dy = event.scrollingDeltaY
         let hasGesturePhase = !event.phase.isEmpty || !event.momentumPhase.isEmpty
 
         if hasGesturePhase {
+            if event.phase.contains(.began) {
+                FrameMeter.begin(time: event.timestamp, mode: "legacy")
+            }
+            defer {
+                if FrameMeter.enabled {
+                    FrameMeter.noteEvent(time: event.timestamp, raw: dx, applied: appliedDX,
+                                         handler: CACurrentMediaTime() - handlerStart)
+                    if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+                        FrameMeter.finish(time: event.timestamp, velocity: measuredVelocity)
+                    }
+                }
+            }
             if event.phase.contains(.began) {
                 horizontalSwipe = false
                 dampedScrollDX = 0
@@ -199,11 +214,13 @@ final class OverlayController {
                 if horizontalSwipe {
                     if let dampedDX = dampedHorizontalDelta(dx) {
                         swipeEnergy += dampedDX
+                        appliedDX = dampedDX * 1.14
                         LauncherBus.shared.liveScroll(dx: dampedDX)
                     }
                 }
             }
             if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+                measuredVelocity = dampedScrollDX
                 if horizontalSwipe {
                     LauncherBus.shared.endScroll(velocity: dampedScrollDX, energy: swipeEnergy)
                 }
@@ -269,6 +286,9 @@ final class OverlayController {
     }
 
     @objc private func displayLinkFired(_ link: CADisplayLink) {
+        if FrameMeter.enabled {
+            FrameMeter.noteTick(timestamp: link.timestamp, target: link.targetTimestamp, now: CACurrentMediaTime())
+        }
         let duration = link.targetTimestamp - link.timestamp
         LauncherBus.shared.displayFrame(duration: duration)
     }

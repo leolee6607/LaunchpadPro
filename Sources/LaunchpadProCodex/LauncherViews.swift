@@ -30,6 +30,7 @@ struct LauncherRootView: View {
     }
 
     var body: some View {
+        let _ = FrameMeter.noteBody(.root)
         ZStack(alignment: .top) {
             Color.black.opacity(settings.backgroundDim)
                 .ignoresSafeArea()
